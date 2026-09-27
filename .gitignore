@@ -1,0 +1,16 @@
+# Generated GMAT/pipeline output -- regenerate via the scripts in gmat/ and tools/
+data/*.txt
+data/*.json
+data/*.data
+
+# GMAT run artifacts
+*.log
+DifferentialCorrector*.data
+
+# Python
+__pycache__/
+*.pyc
+
+# OS cruft
+.DS_Store
+Thumbs.db

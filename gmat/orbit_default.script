@@ -1,0 +1,184 @@
+%General Mission Analysis Tool(GMAT) Script
+%Default scenario: single spacecraft in a stable LEO orbit.
+%No burns, no targeting -- just a dense position/velocity ephemeris for one full orbit,
+%meant to be regenerated on a schedule and fed to the WebVerse bridge.
+
+%----------------------------------------
+%---------- Spacecraft
+%----------------------------------------
+
+Create Spacecraft SC;
+GMAT SC.DateFormat = A1Gregorian;
+GMAT SC.Epoch = '17 Sep 2026 12:00:00.000';
+GMAT SC.CoordinateSystem = EarthMJ2000Eq;
+GMAT SC.DisplayStateType = Keplerian;
+GMAT SC.SMA = 6777.999999999999;
+GMAT SC.ECC = 0.0009999999999998248;
+GMAT SC.INC = 51.60000000000001;
+GMAT SC.RAAN = 0;
+GMAT SC.AOP = 0;
+GMAT SC.TA = 0;
+GMAT SC.DryMass = 500;
+GMAT SC.Cd = 2.2;
+GMAT SC.Cr = 1.8;
+GMAT SC.DragArea = 15;
+GMAT SC.SRPArea = 1;
+GMAT SC.SPADDragScaleFactor = 1;
+GMAT SC.SPADSRPScaleFactor = 1;
+GMAT SC.AtmosDensityScaleFactor = 1;
+GMAT SC.ExtendedMassPropertiesModel = 'None';
+GMAT SC.NAIFId = -10056001;
+GMAT SC.NAIFIdReferenceFrame = -9056001;
+GMAT SC.OrbitColor = Red;
+GMAT SC.TargetColor = Teal;
+GMAT SC.OrbitErrorCovariance = [ 1e+70 0 0 0 0 0 ; 0 1e+70 0 0 0 0 ; 0 0 1e+70 0 0 0 ; 0 0 0 1e+70 0 0 ; 0 0 0 0 1e+70 0 ; 0 0 0 0 0 1e+70 ];
+GMAT SC.CdSigma = 1e+70;
+GMAT SC.CrSigma = 1e+70;
+GMAT SC.Id = 'SatId';
+GMAT SC.Attitude = CoordinateSystemFixed;
+GMAT SC.SPADSRPInterpolationMethod = Bilinear;
+GMAT SC.SPADSRPScaleFactorSigma = 1e+70;
+GMAT SC.SPADDragInterpolationMethod = Bilinear;
+GMAT SC.SPADDragScaleFactorSigma = 1e+70;
+GMAT SC.AtmosDensityScaleFactorSigma = 1e+70;
+GMAT SC.ModelFile = 'aura.3ds';
+GMAT SC.ModelOffsetX = 0;
+GMAT SC.ModelOffsetY = 0;
+GMAT SC.ModelOffsetZ = 0;
+GMAT SC.ModelRotationX = 0;
+GMAT SC.ModelRotationY = 0;
+GMAT SC.ModelRotationZ = 0;
+GMAT SC.ModelScale = 1;
+GMAT SC.AttitudeDisplayStateType = 'Quaternion';
+GMAT SC.AttitudeRateDisplayStateType = 'AngularVelocity';
+GMAT SC.AttitudeCoordinateSystem = EarthMJ2000Eq;
+GMAT SC.EulerAngleSequence = '321';
+
+
+%----------------------------------------
+%---------- ForceModels
+%----------------------------------------
+
+Create ForceModel DefaultProp_ForceModel;
+GMAT DefaultProp_ForceModel.CentralBody = Earth;
+GMAT DefaultProp_ForceModel.PrimaryBodies = {Earth};
+GMAT DefaultProp_ForceModel.Drag = None;
+GMAT DefaultProp_ForceModel.SRP = Off;
+GMAT DefaultProp_ForceModel.RelativisticCorrection = Off;
+GMAT DefaultProp_ForceModel.ErrorControl = RSSStep;
+GMAT DefaultProp_ForceModel.GravityField.Earth.Degree = 4;
+GMAT DefaultProp_ForceModel.GravityField.Earth.Order = 4;
+GMAT DefaultProp_ForceModel.GravityField.Earth.StmLimit = 100;
+GMAT DefaultProp_ForceModel.GravityField.Earth.PotentialFile = 'JGM2.cof';
+GMAT DefaultProp_ForceModel.GravityField.Earth.TideModel = 'None';
+
+%----------------------------------------
+%---------- Propagators
+%----------------------------------------
+
+Create Propagator DefaultProp;
+GMAT DefaultProp.FM = DefaultProp_ForceModel;
+GMAT DefaultProp.Type = RungeKutta89;
+GMAT DefaultProp.InitialStepSize = 60;
+GMAT DefaultProp.Accuracy = 9.999999999999999e-12;
+GMAT DefaultProp.MinStep = 0.001;
+GMAT DefaultProp.MaxStep = 60;
+GMAT DefaultProp.MaxStepAttempts = 50;
+GMAT DefaultProp.StopIfAccuracyIsViolated = true;
+
+%----------------------------------------
+%---------- Subscribers
+%----------------------------------------
+
+Create OpenFramesInterface DefaultOrbitView;
+GMAT DefaultOrbitView.SolverIterations = Current;
+GMAT DefaultOrbitView.UpperLeft = [ 0.1376470588235294 0.2864137086903305 ];
+GMAT DefaultOrbitView.Size = [ 0.5994117647058823 0.598531211750306 ];
+GMAT DefaultOrbitView.RelativeZOrder = 667;
+GMAT DefaultOrbitView.Maximized = false;
+GMAT DefaultOrbitView.Add = {SC, Earth};
+GMAT DefaultOrbitView.View = {DefaultOrbitView_View};
+GMAT DefaultOrbitView.CoordinateSystem = EarthMJ2000Eq;
+GMAT DefaultOrbitView.DrawObject = [ true true ];
+GMAT DefaultOrbitView.DrawTrajectory = [ true true ];
+GMAT DefaultOrbitView.DrawAxes = [ false false ];
+GMAT DefaultOrbitView.DrawXYPlane = [ false false ];
+GMAT DefaultOrbitView.DrawLabel = [ true true ];
+GMAT DefaultOrbitView.DrawUsePropLabel = [ false false ];
+GMAT DefaultOrbitView.DrawCenterPoint = [ true true ];
+GMAT DefaultOrbitView.DrawEndPoints = [ true true ];
+GMAT DefaultOrbitView.DrawVelocity = [ false false ];
+GMAT DefaultOrbitView.DrawGrid = [ false false ];
+GMAT DefaultOrbitView.DrawLineWidth = [ 2 2 ];
+GMAT DefaultOrbitView.DrawMarkerSize = [ 10 10 ];
+GMAT DefaultOrbitView.DrawFontSize = [ 20 20 ];
+GMAT DefaultOrbitView.Axes = On;
+GMAT DefaultOrbitView.AxesLength = 12756.2726;
+GMAT DefaultOrbitView.AxesLabels = On;
+GMAT DefaultOrbitView.FrameLabel = Off;
+GMAT DefaultOrbitView.XYPlane = On;
+GMAT DefaultOrbitView.EclipticPlane = Off;
+GMAT DefaultOrbitView.EnableStars = On;
+GMAT DefaultOrbitView.StarCatalog = 'inp_StarsHYGv3.txt';
+GMAT DefaultOrbitView.StarCount = 40000;
+GMAT DefaultOrbitView.MinStarMag = -2;
+GMAT DefaultOrbitView.MaxStarMag = 6;
+GMAT DefaultOrbitView.MinStarPixels = 1;
+GMAT DefaultOrbitView.MaxStarPixels = 10;
+GMAT DefaultOrbitView.MinStarDimRatio = 0.5;
+GMAT DefaultOrbitView.ShowPlot = true;
+GMAT DefaultOrbitView.ShowToolbar = true;
+GMAT DefaultOrbitView.SolverIterLastN = 0;
+GMAT DefaultOrbitView.ShowVR = false;
+GMAT DefaultOrbitView.PlaybackTimeScale = 3600;
+GMAT DefaultOrbitView.MultisampleAntiAliasing = On;
+GMAT DefaultOrbitView.MSAASamples = 2;
+GMAT DefaultOrbitView.DrawFontPosition = {'Top-Right', 'Top-Right'};
+
+Create ReportFile rf;
+GMAT rf.SolverIterations = Current;
+GMAT rf.UpperLeft = [ 0 0 ];
+GMAT rf.Size = [ 0 0 ];
+GMAT rf.RelativeZOrder = 0;
+GMAT rf.Maximized = false;
+GMAT rf.Filename = 'G:\Claude-projects\Project-BoneStar\data\orbit_default.txt';
+GMAT rf.Precision = 16;
+GMAT rf.WriteHeaders = true;
+GMAT rf.LeftJustify = On;
+GMAT rf.ZeroFill = Off;
+GMAT rf.FixedWidth = true;
+GMAT rf.Delimiter = ' ';
+GMAT rf.ColumnWidth = 23;
+GMAT rf.WriteReport = true;
+GMAT rf.AppendToExistingFile = false;
+
+%----------------------------------------
+%---------- User Objects
+%----------------------------------------
+
+Create OpenFramesView DefaultOrbitView_View;
+GMAT DefaultOrbitView_View.ViewFrame = CoordinateSystem;
+GMAT DefaultOrbitView_View.ViewTrajectory = Off;
+GMAT DefaultOrbitView_View.InertialFrame = Off;
+GMAT DefaultOrbitView_View.SetDefaultLocation = On;
+GMAT DefaultOrbitView_View.DefaultEye = [ 30000 0 0 ];
+GMAT DefaultOrbitView_View.DefaultCenter = [ 0 0 0 ];
+GMAT DefaultOrbitView_View.DefaultUp = [ 0 0 1 ];
+GMAT DefaultOrbitView_View.SetCurrentLocation = On;
+GMAT DefaultOrbitView_View.CurrentEye = [ 11614.86957134731 10948.41515423798 918.8218940694479 ];
+GMAT DefaultOrbitView_View.CurrentCenter = [ 0 0 -6.821210263296962e-13 ];
+GMAT DefaultOrbitView_View.CurrentUp = [ -0.05129617586932145 -0.0293574274639079 0.9982518939595783 ];
+GMAT DefaultOrbitView_View.FOVy = 45;
+
+%----------------------------------------
+%---------- Mission Sequence
+%----------------------------------------
+
+BeginMissionSequence;
+
+Report rf SC.ElapsedSecs SC.UTCGregorian SC.EarthMJ2000Eq.X SC.EarthMJ2000Eq.Y SC.EarthMJ2000Eq.Z SC.EarthMJ2000Eq.VX SC.EarthMJ2000Eq.VY SC.EarthMJ2000Eq.VZ;
+
+While SC.ElapsedSecs < 5580
+   Propagate DefaultProp(SC) {SC.ElapsedSecs = 60};
+   Report rf SC.ElapsedSecs SC.UTCGregorian SC.EarthMJ2000Eq.X SC.EarthMJ2000Eq.Y SC.EarthMJ2000Eq.Z SC.EarthMJ2000Eq.VX SC.EarthMJ2000Eq.VY SC.EarthMJ2000Eq.VZ;
+EndWhile;
