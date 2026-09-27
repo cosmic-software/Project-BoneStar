@@ -14,7 +14,12 @@ import sys
 from pathlib import Path
 
 COLUMN_WIDTH = 26
-NUM_COLUMNS = 8  # ElapsedSecs, UTCGregorian, X, Y, Z, VX, VY, VZ
+NUM_COLUMNS = 11  # ElapsedSecs, UTCGregorian, X, Y, Z, VX, VY, VZ, SunX, SunY, SunZ
+
+
+def _unit(v):
+    mag = (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5
+    return [v[0] / mag, v[1] / mag, v[2] / mag]
 
 
 def parse_report(path):
@@ -30,7 +35,7 @@ def parse_report(path):
                 for i in range(NUM_COLUMNS)
             ]
 
-            if fields[0].startswith("SC."):
+            if fields[0].startswith("SC.") or fields[0].startswith("Sun."):
                 continue  # header row (repeats once per Report call site)
 
             try:
@@ -38,11 +43,16 @@ def parse_report(path):
             except ValueError:
                 continue  # not a data row we recognize -- skip rather than crash
 
+            pos = [float(fields[2]), float(fields[3]), float(fields[4])]
+            sun_pos = [float(fields[8]), float(fields[9]), float(fields[10])]
+            sun_dir = _unit([sun_pos[i] - pos[i] for i in range(3)])
+
             rows.append({
                 "t": t,
                 "utc": fields[1],
-                "pos": [float(fields[2]), float(fields[3]), float(fields[4])],
+                "pos": pos,
                 "vel": [float(fields[5]), float(fields[6]), float(fields[7])],
+                "sun_dir": sun_dir,
             })
     return rows
 
@@ -65,7 +75,7 @@ def main():
         "epoch": rows[0]["utc"],
         "objects": {
             object_name: [
-                {"t": r["t"], "pos": r["pos"], "vel": r["vel"]}
+                {"t": r["t"], "pos": r["pos"], "vel": r["vel"], "sun_dir": r["sun_dir"]}
                 for r in rows
             ]
         },

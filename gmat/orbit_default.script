@@ -102,8 +102,8 @@ Create OpenFramesInterface DefaultOrbitView;
 GMAT DefaultOrbitView.SolverIterations = Current;
 GMAT DefaultOrbitView.UpperLeft = [ 0.1371350984385608 0.2851897184822522 ];
 GMAT DefaultOrbitView.Size = [ 0.5987780040733197 0.5973072215422277 ];
-GMAT DefaultOrbitView.RelativeZOrder = 773;
-GMAT DefaultOrbitView.Maximized = false;
+GMAT DefaultOrbitView.RelativeZOrder = 781;
+GMAT DefaultOrbitView.Maximized = true;
 GMAT DefaultOrbitView.Add = {SC, Earth, Luna};
 GMAT DefaultOrbitView.View = {DefaultOrbitView_View};
 GMAT DefaultOrbitView.CoordinateSystem = EarthMJ2000Eq;
@@ -149,7 +149,7 @@ GMAT rf.UpperLeft = [ 0 0 ];
 GMAT rf.Size = [ 0 0 ];
 GMAT rf.RelativeZOrder = 0;
 GMAT rf.Maximized = false;
-GMAT rf.Filename = 'G:\Claude-projects\Blender-Gmat\data\orbit_default.txt';
+GMAT rf.Filename = 'G:\Claude-projects\Project-BoneStar\data\orbit_default.txt';
 GMAT rf.Precision = 16;
 GMAT rf.WriteHeaders = true;
 GMAT rf.LeftJustify = On;
@@ -173,9 +173,9 @@ GMAT DefaultOrbitView_View.DefaultEye = [ 30000 0 0 ];
 GMAT DefaultOrbitView_View.DefaultCenter = [ 0 0 0 ];
 GMAT DefaultOrbitView_View.DefaultUp = [ 0 0 1 ];
 GMAT DefaultOrbitView_View.SetCurrentLocation = On;
-GMAT DefaultOrbitView_View.CurrentEye = [ -27.26841727290211 3.967506727644226 -1.957463299618626 ];
-GMAT DefaultOrbitView_View.CurrentCenter = [ -3.552713678800501e-15 7.94475596421762e-13 -5.735412145213559e-13 ];
-GMAT DefaultOrbitView_View.CurrentUp = [ -0.1217981067037601 -0.3859473949757026 0.91444509376717 ];
+GMAT DefaultOrbitView_View.CurrentEye = [ 6.782937448801714 6.80987976456544 10.02601525844517 ];
+GMAT DefaultOrbitView_View.CurrentCenter = [ 1.77635683940025e-15 7.975842208907125e-13 -5.702105454474804e-13 ];
+GMAT DefaultOrbitView_View.CurrentUp = [ -0.2074954812326107 -0.7382539131371098 0.6418152265300285 ];
 GMAT DefaultOrbitView_View.FOVy = 45;
 
 %----------------------------------------
@@ -184,9 +184,9 @@ GMAT DefaultOrbitView_View.FOVy = 45;
 
 BeginMissionSequence;
 
-Report rf SC.ElapsedSecs SC.UTCGregorian SC.EarthMJ2000Eq.X SC.EarthMJ2000Eq.Y SC.EarthMJ2000Eq.Z SC.EarthMJ2000Eq.VX SC.EarthMJ2000Eq.VY SC.EarthMJ2000Eq.VZ;
+Report rf SC.ElapsedSecs SC.UTCGregorian SC.EarthMJ2000Eq.X SC.EarthMJ2000Eq.Y SC.EarthMJ2000Eq.Z SC.EarthMJ2000Eq.VX SC.EarthMJ2000Eq.VY SC.EarthMJ2000Eq.VZ Sun.EarthMJ2000Eq.X Sun.EarthMJ2000Eq.Y Sun.EarthMJ2000Eq.Z;
 
 While SC.ElapsedSecs < 5580
    Propagate DefaultProp(SC) {SC.ElapsedSecs = 60};
-   Report rf SC.ElapsedSecs SC.UTCGregorian SC.EarthMJ2000Eq.X SC.EarthMJ2000Eq.Y SC.EarthMJ2000Eq.Z SC.EarthMJ2000Eq.VX SC.EarthMJ2000Eq.VY SC.EarthMJ2000Eq.VZ;
+   Report rf SC.ElapsedSecs SC.UTCGregorian SC.EarthMJ2000Eq.X SC.EarthMJ2000Eq.Y SC.EarthMJ2000Eq.Z SC.EarthMJ2000Eq.VX SC.EarthMJ2000Eq.VY SC.EarthMJ2000Eq.VZ Sun.EarthMJ2000Eq.X Sun.EarthMJ2000Eq.Y Sun.EarthMJ2000Eq.Z;
 EndWhile;
