@@ -7,6 +7,11 @@ state and interpolates for playback -- it does no orbital computation itself.
 The current test case tracks the **ISS** and the **Hubble Space Telescope** from their
 public TLEs.
 
+<p align="center">
+  <img src="docs/images/earth-atlantic-day.png" width="560"
+       alt="The Earth from space over the Atlantic in daylight, with ISS (ZARYA) and HST labels">
+</p>
+
 ## Pipeline
 
 ```
@@ -83,6 +88,24 @@ What you see:
 - **Labels**: each spacecraft's name, facing the camera at any zoom.
 - **Assets panel** (top right): click Earth or a spacecraft to centre the view on it; click
   the ASSETS header to collapse it.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/africa-after-sunset.png" alt="Africa just after sunset, a thin sunlit crescent on the western limb"><br>
+      <sub>Africa just after sunset: the day side has moved west with the Sun.</sub></td>
+    <td width="50%"><img src="docs/images/arctic-terminator.png" alt="The Arctic from above with the day/night line crossing Greenland"><br>
+      <sub>The Arctic just after the September equinox: the terminator runs almost through the pole.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/hubble-over-pacific.png" alt="Hubble over the Pacific in daylight, North America at the limb"><br>
+      <sub>Hubble over the Pacific, North America on the limb.</sub></td>
+    <td width="50%"><img src="docs/images/hubble-at-the-limb.png" alt="Hubble close to the limb with the atmosphere glow behind it"><br>
+      <sub>Hubble at the limb. Up close the glow's four shells show as bands (see Known issues).</sub></td>
+  </tr>
+</table>
+
+<img src="docs/images/assets-panel.png" width="200" align="right"
+     alt="The Assets panel listing Earth, HST and ISS (ZARYA), with Earth selected">
 
 | Control | Action |
 |---|---|
