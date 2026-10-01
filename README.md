@@ -35,7 +35,7 @@ tools/    run_fleet.py (the fleet job), gmat_to_webverse.py (single-orbit demo c
 gmat/     GMAT scenario scripts (the single-orbit demo)
 data/     generated output: OEMs, JSON, the generated GMAT script (not committed)
 models/   probe.glb (spacecraft), earth.glb (NASA Blue Marble globe, unit radius),
-          atmosphere.glb (glow shells, unit = Earth radius)
+          atmosphere.glb (glow shells + night-side caps, unit = Earth radius)
 webverse/ the WebVerse world: index.veml (scene) + Scripts/orbit.js (playback, camera)
 ```
 
@@ -84,7 +84,8 @@ What you see:
 - **Earth**: NASA Blue Marble (shaded relief and bathymetry), turned to GMAT's rotation angle
   and spinning at the sidereal rate, so each spacecraft is over the right place.
 - **Sunlight** from GMAT's Sun direction: a real day side and terminator.
-- **Atmosphere**: a basic blue glow around the limb, brighter on the day side.
+- **Atmosphere**: a basic blue glow around the limb, brighter on the day side, and a
+  darkening night side with a soft terminator.
 - **Labels**: each spacecraft's name, facing the camera at any zoom.
 - **Assets panel** (top right): click Earth or a spacecraft to centre the view on it; click
   the ASSETS header to collapse it.
@@ -114,11 +115,15 @@ What you see:
 | Assets panel row | centre the view on that object |
 | Left arrow | next spacecraft: the camera rides with it, 1 unit out |
 | Right arrow, R | Earth view (starts 4 Earth radii out) |
+| G | atmosphere (glow and night side) on / off |
 
 Lighting: WebVerse gives a VEML world no control over ambient light (it comes from the
-runtime's default sky), so an ambient level of 0.2 is emulated. The models' base colours
-are scaled by 0.2 and the sun is 5x brighter (`AMBIENT_EQUIVALENT` in `orbit.js`), which
-keeps the day side as bright and makes the night side 20% as bright.
+runtime's default sky). So the models' base colours are scaled down (Earth 0.4) and the sun
+is raised to 6.25 (`SUN_INTENSITY` in `orbit.js`): day sides look as they would at a 2.5 sun,
+the night side is dimmer, and the surface keeps a soft sheen. `atmosphere.glb` then adds the
+glow (four see-through blue shells at 38-191 km) and, drawn after them, thirteen flat-black
+caps at 223-246 km that darken the night side by a further 50%; the script turns the model
+so the caps face away from GMAT's Sun.
 
 ### Adding a spacecraft
 
@@ -171,10 +176,18 @@ Working locally for the ISS and Hubble.
 
 Known issues:
 
+- **The night side can vanish** depending on camera position (it can flip on and off as the
+  camera orbits or zooms, e.g. close to a spacecraft over the night side). Being looked into.
+  Findings so far: this WebVerse build doesn't render transparency that comes from a texture;
+  its see-through materials write depth; and separate see-through models are drawn in order of
+  camera distance. Merging the glow and the night caps into one model did not remove the flip.
 - The atmosphere glow looks stepped up close (from a spacecraft view the four shells show as
   separate bands); more, thinner shells would smooth it.
-- The Earth texture (4096 x 2048, ~10 km per pixel) is soft up close.
-- The night side keeps a faint haze near the limb, from the default sky's reflections.
+- The Earth texture (4096 x 2048, ~10 km per pixel) is soft up close, and the surface sheen
+  makes it look darker when viewed straight down than at a slant.
+- WebVerse caches models (`%LOCALAPPDATA%\Programs\webverse\wv_cache\`) and may keep an old
+  copy after a model changes; delete the cached file to force a fresh download. (Don't add
+  `?v=...` to model URLs: the cache can't store the name and the world fails to load.)
 
 Not built yet: a real-time clock sync (the viewer counts forward from the job's run time)
 and scheduling the fleet job.

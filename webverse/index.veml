@@ -30,10 +30,16 @@
       <mesh-name>../models/earth.glb</mesh-name>
       <mesh-resource>../models/earth.glb</mesh-resource>
     </entity>
-    <!-- Atmospheric glow: four nearly transparent blue shells at 38-191 km (1.006-1.030 Earth
-         radii), same centre and scale as the Earth. Thin over the face of the globe, thicker at
-         the edge where the line of sight crosses every shell twice; lit by the same sun, so it
-         fades on the night side. Spacecraft (~420+ km) stay outside it. -->
+    <!-- Atmosphere and night side, ONE model drawn in a fixed order:
+         1. four lit, nearly transparent blue shells at 38-191 km (the glow; a soft rim at the
+            limb where the line of sight crosses every shell twice);
+         2. thirteen nested, unlit, flat-black hemispherical caps at 223-246 km, overlapping to
+            50% opacity around local midnight and fading in 1 deg steps across the terminator.
+         Scripts/orbit.js turns the model so the caps face away from GMAT's Sun (the shells are
+         spheres, so turning them changes nothing). One model because this runtime sorts
+         separate see-through models by camera distance, and their see-through materials write
+         depth: as two models, the caps vanished whenever the camera moved so the glow drew
+         last. Flat colours only: textured transparency does not render in this WebVerse build. -->
     <entity xsi:type="mesh" tag="Atmosphere" id="6f2a9c41-8d3e-4b57-a1c6-0e5d7b3f9a28">
       <transform xsi:type="scaletransform">
         <position x="0" y="0" z="0" />

@@ -30,6 +30,7 @@ var earthRate = 0;        // deg/s
 //   Left arrow           next spacecraft view (camera rides with it, 1 unit out)
 //   Right arrow          Earth view
 //   R                    back to the starting view (Earth)
+//   G                    atmosphere (glow and night side) on / off
 const EARTH_RADIUS = 6378.1363 * KM_TO_WORLD_UNITS;
 const START_YAW = 0;
 const START_PITCH = 15;
@@ -99,6 +100,8 @@ function Zoom(factor) {
 }
 
 var leftWasDown = false;
+var gWasDown = false;
+var atmosphereOn = true;
 
 function UpdateCamera() {
     var changed = false;
@@ -130,6 +133,17 @@ function UpdateCamera() {
         SetFocus(fleetTags[next]);
         return;
     }
+    // G: atmosphere glow on/off
+    var gDown = Input.GetKeyValue("g");
+    if (gDown && !gWasDown) {
+        var air = Entity.GetByTag("Atmosphere");
+        if (air !== null) {
+            atmosphereOn = !atmosphereOn;
+            air.SetVisibility(atmosphereOn);
+            Report("atmosphere " + (atmosphereOn ? "on" : "off"));
+        }
+    }
+    gWasDown = gDown;
     if (Input.GetKeyValue("ArrowRight") && focusTag !== "Earth") {
         SetFocus("Earth");
         return;
@@ -146,6 +160,7 @@ function UpdateCamera() {
     UpdateLabels();
     UpdateHud();
 }
+
 
 // ---- Assets panel ----
 // A heads-up panel built from the runtime's own text and buttons (the approach in Dylan Baker's
@@ -409,12 +424,12 @@ function OnEphemerisLoaded(body) {
 
 // The VEML light is created as a Unity point light (the runtime's default), which doesn't
 // reach the Earth at this scale. Make it a directional sun shining from GMAT's Sun direction.
-// WebVerse gives VEML worlds no ambient control (ambient comes from its default sky and is
-// never recomputed), so an ambient of 0.2 is emulated: earth.glb and probe.glb have their
-// base colours scaled by 0.2 and the sun is raised by 1/0.2. Day side: as bright as with a
-// 2.5 sun; night side (ambient only): 20% of what it was.
-const AMBIENT_EQUIVALENT = 0.2;
-const SUN_INTENSITY = 2.5 / AMBIENT_EQUIVALENT;
+// Lights the Earth, the glow and the spacecraft. WebVerse gives VEML worlds no ambient
+// control, so the models' base colours are scaled down (Earth 0.4) and the sun raised to
+// match: day sides look as they would at a 2.5 sun, with 2.5x the usual sheen (the soft
+// luminous look) and a dimmer, ambient-lit night side. The night mask (in atmosphere.glb, 50%,
+// turned away from the Sun below) darkens the night side further.
+const SUN_INTENSITY = 6.25;
 
 function PointSun(sunDir) {
     var sun = Entity.GetByTag("sun");
@@ -431,8 +446,26 @@ function PointSun(sunDir) {
     var pitch = Math.asin(-fy) * 180 / Math.PI;
     var yaw = Math.atan2(fx, fz) * 180 / Math.PI;
     sun.SetEulerRotation(new Vector3(pitch, yaw, 0), false);
+    PointNightMask(-sunDir[0], -sunDir[2], -sunDir[1]);
     Report("sun: directional, pitch " + pitch.toFixed(2) + " yaw " + yaw.toFixed(2)
         + ", intensity " + SUN_INTENSITY + " set " + propsSet);
+}
+
+// Point the night mask's pole (+Y of atmosphere.glb, local midnight) along the Unity direction (dx, dy, dz)
+// away from the Sun: the rotation taking +Y onto d is about axis Y x d by angle acos(dy).
+function PointNightMask(dx, dy, dz) {
+    var night = Entity.GetByTag("Atmosphere");
+    if (night === null) {
+        Report("night: no entity tagged Atmosphere");
+        return;
+    }
+    var ax = dz, az = -dx;
+    var len = Math.sqrt(ax * ax + az * az);
+    var angle = Math.acos(Math.max(-1, Math.min(1, dy)));
+    var q = len < 1e-9 ? new Quaternion(0, 0, 0, 1)
+        : new Quaternion(ax / len * Math.sin(angle / 2), 0, az / len * Math.sin(angle / 2), Math.cos(angle / 2));
+    night.SetRotation(q, false);
+    Report("night: pole toward (" + dx.toFixed(4) + ", " + dy.toFixed(4) + ", " + dz.toFixed(4) + ")");
 }
 
 // Turn the Earth so its texture's Greenwich meridian points where GMAT says it does.
