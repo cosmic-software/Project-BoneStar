@@ -1,26 +1,31 @@
-// Project BoneStar -- initial WebVerse test build.
-// Loads the GMAT-generated ephemeris and drives the SC mesh entity's position from it,
-// looping forever on the orbital period. Position values are scaled from km to world
-// units (1 unit = 100 km) since raw km values are far too large for a Unity scene scale.
+// Project BoneStar -- WebVerse viewer.
+// Loads data/fleet.json (written by tools/run_fleet.py: TLEs -> GMAT headless -> CCSDS OEM)
+// and flies one mesh per spacecraft, tagged with its catalog number in index.veml.
+// Playback starts at the moment the fleet job ran and advances in real time; it holds the
+// last position at the end of the window instead of looping. Positions are scaled from km
+// to world units (1 unit = 100 km).
 
-const EPHEMERIS_URL = "http://localhost:8000/data/orbit_default.json";
+const EPHEMERIS_URL = "http://localhost:8000/data/fleet.json";
 const KM_TO_WORLD_UNITS = 1 / 100;
 
-var ephemeris = null;
-var period = null;
+var fleet = null;         // { catalog number: [ {t, pos, vel}, ... ] }
+var fleetNames = {};      // { catalog number: name from the TLE }
+var fleetTags = [];       // catalog numbers, in the order the left arrow cycles through them
+var windowEnd = 0;
+var windowEndReported = false;
 // Jint (WebVerse's JS engine) has no Date.now(), so the clock counts UpdateOrbit ticks.
 const ORBIT_TICK_SECONDS = 0.1;
-var elapsedSeconds = 0;
+var elapsedSeconds = 0;   // seconds after the fleet window's epoch
 
 // ---- Orbit camera ----
 // VEML has no camera element -- the runtime owns the camera and scripts place it.
-// The camera orbits a focus object and always aims at its centre. The focus is chosen in
-// the Assets panel: Earth (the start: 4 radii out) or the probe (the camera becomes a child
-// of the probe, so it rides along, starting 1 unit away). Controls:
+// The camera orbits a focus object and always aims at its centre: Earth (the start, 4 radii
+// out) or a spacecraft (the camera becomes a child of it, so it rides along, starting 1 unit
+// away). Controls:
 //   left-drag            orbit around the focus
 //   W / S  or  = / -     zoom in / out      (no scroll wheel in the runtime's input API)
 //   right-drag up/down   zoom in / out
-//   Left arrow           probe view (camera rides with the probe, 1 unit out)
+//   Left arrow           next spacecraft view (camera rides with it, 1 unit out)
 //   Right arrow          Earth view
 //   R                    back to the starting view (Earth)
 const EARTH_RADIUS = 6378.1363 * KM_TO_WORLD_UNITS;
@@ -30,18 +35,21 @@ const ORBIT_DEG_PER_PIXEL = 1.0;  // measured: mouse deltas arrive as 3-7 px ste
 const KEY_ZOOM_PER_TICK = 1.01;   // per 0.01 s tick
 const DRAG_ZOOM_PER_PIXEL = 0.01;
 
-// Per-focus framing, in world units. The probe model's pivot is its centre and its bounding
-// sphere at scale 0.05 has radius 0.865, so 1 unit is just outside it.
-const FOCI = {
-    "Earth": { start: 4 * EARTH_RADIUS, min: 1.05 * EARTH_RADIUS, max: 40 * EARTH_RADIUS },
-    "SC":    { start: 1.0,              min: 0.9,                 max: 100 }
-};
+// Framing, in world units. Every spacecraft uses probe.glb at scale 0.05: its pivot is its
+// centre and its bounding sphere has radius 0.865, so 1 unit is just outside it.
+const EARTH_FRAMING = { start: 4 * EARTH_RADIUS, min: 1.05 * EARTH_RADIUS, max: 40 * EARTH_RADIUS };
+const SPACECRAFT_FRAMING = { start: 1.0, min: 0.9, max: 100 };
+
+function Framing(tag) {
+    return tag === "Earth" ? EARTH_FRAMING : SPACECRAFT_FRAMING;
+}
+
 var focusTag = "Earth";
 var focusEntity = null;   // null = world origin (Earth's centre); otherwise the camera's parent
 var focusScale = 1;       // parent's scale: local offsets are in its scaled space
 var camYaw = START_YAW;
 var camPitch = START_PITCH;
-var camDistance = FOCI["Earth"].start;
+var camDistance = EARTH_FRAMING.start;
 
 function PlaceCamera() {
     var yaw = camYaw * Math.PI / 180;
@@ -61,9 +69,6 @@ function PlaceCamera() {
 }
 
 function SetFocus(tag) {
-    if (!FOCI[tag]) {
-        return;
-    }
     if (tag === "Earth") {
         Camera.AttachToEntity(null);
         focusEntity = null;
@@ -79,16 +84,19 @@ function SetFocus(tag) {
         focusScale = entity.GetScale().x;
     }
     focusTag = tag;
-    camDistance = FOCI[tag].start;
+    camDistance = Framing(tag).start;
     PlaceCamera();
     PanelCall("assets-panel", "setSelected('" + tag + "')");
-    Report("focus " + tag + " dist " + camDistance + " parent scale " + focusScale);
+    Report("focus " + tag + (fleetNames[tag] ? " (" + fleetNames[tag] + ")" : "")
+        + " dist " + camDistance + " parent scale " + focusScale);
 }
 
 function Zoom(factor) {
-    var f = FOCI[focusTag];
+    var f = Framing(focusTag);
     camDistance = Math.max(f.min, Math.min(f.max, camDistance * factor));
 }
+
+var leftWasDown = false;
 
 function UpdateCamera() {
     var changed = false;
@@ -110,10 +118,14 @@ function UpdateCamera() {
         Zoom(KEY_ZOOM_PER_TICK);
         changed = true;
     }
-    // Stand-in for the Assets panel until it renders: left arrow = probe view,
+    // Stand-in for the Assets panel until it renders: left arrow = next spacecraft,
     // right arrow = Earth view. (Key names are the runtime's: DesktopInput.cs.)
-    if (Input.GetKeyValue("ArrowLeft") && focusTag !== "SC") {
-        SetFocus("SC");
+    var leftDown = Input.GetKeyValue("ArrowLeft");
+    var leftPressed = leftDown && !leftWasDown;   // one switch per press, not per tick held
+    leftWasDown = leftDown;
+    if (leftPressed && fleetTags.length > 0) {
+        var next = (fleetTags.indexOf(focusTag) + 1) % fleetTags.length;   // Earth (-1) -> first
+        SetFocus(fleetTags[next]);
         return;
     }
     if (Input.GetKeyValue("ArrowRight") && focusTag !== "Earth") {
@@ -212,8 +224,9 @@ function OnPanelMessage(message) {
 }
 
 // ---- Diagnostics ----
-// Production WebVerse builds drop script Logging output, so events (focus changes, UI set-up)
-// are sent to the local server as requests (GET /__diag?...) and read from its request log.
+// Production WebVerse builds drop script Logging output, so events (focus changes, UI set-up,
+// fleet loading) are sent to the local server as requests (GET /__diag?...) and read from
+// its request log.
 const DIAG_URL = "http://localhost:8000/__diag?";
 
 function Report(msg) {
@@ -223,56 +236,80 @@ function Report(msg) {
 function OnReportSent(body) {
 }
 
-PlaceCamera();
-Time.SetInterval(`UpdateCamera();`, 0.01);
-// CreateUI();  // off for now: the screen canvas reports size 0x0, so the panels get no area
-
-HTTPNetworking.Fetch(EPHEMERIS_URL, "OnEphemerisLoaded");
-
+// ---- Fleet playback ----
 // The runtime calls this with the response body as a string, not a response
 // object (HTTPNetworking.cs) -- an empty string means the fetch failed.
 function OnEphemerisLoaded(body) {
     if (!body) {
-        Logging.LogError("Failed to load ephemeris from " + EPHEMERIS_URL + " (is the local server running?)");
+        Report("fleet: failed to load " + EPHEMERIS_URL);
         return;
     }
-
     var parsed = JSON.parse(body);
-    ephemeris = parsed.objects.SC;
-    period = ephemeris[ephemeris.length - 1].t;
-
-    Logging.Log("Ephemeris loaded: " + ephemeris.length + " samples, period " + period + "s");
-
+    fleet = parsed.objects;
+    fleetNames = parsed.names;
+    fleetTags = [];
+    for (var tag in fleet) {
+        fleetTags.push(tag);
+        var track = fleet[tag];
+        windowEnd = Math.max(windowEnd, track[track.length - 1].t);
+        if (Entity.GetByTag(tag) === null) {
+            Report("fleet: no entity tagged " + tag + " (" + fleetNames[tag] + ") in index.veml");
+        }
+    }
+    elapsedSeconds = parsed.generated_t;   // start where "now" was when the fleet job ran
+    Report("fleet: " + fleetTags.join(",") + " window from " + parsed.epoch + " UTC, starting at t "
+        + elapsedSeconds + " s (" + parsed.generated + " UTC)");
     Time.SetInterval(`UpdateOrbit();`, ORBIT_TICK_SECONDS);
 }
 
-function UpdateOrbit() {
-    if (ephemeris === null) {
-        return;
-    }
-
-    elapsedSeconds += ORBIT_TICK_SECONDS;
-    var elapsed = elapsedSeconds % period;
-
-    // Find the bracketing samples and linearly interpolate position between them.
+// Position (km) at time t on one track: cubic Hermite between the bracketing states, using
+// their velocities, so it follows the orbit's curve instead of cutting the 60 s chords.
+function PositionAt(track, t) {
     var i = 0;
-    while (i < ephemeris.length - 1 && ephemeris[i + 1].t <= elapsed) {
+    while (i < track.length - 2 && track[i + 1].t <= t) {
         i++;
     }
-    var a = ephemeris[i];
-    var b = ephemeris[Math.min(i + 1, ephemeris.length - 1)];
-    var span = b.t - a.t;
-    var frac = span > 0 ? (elapsed - a.t) / span : 0;
+    var a = track[i];
+    var b = track[i + 1];
+    var h = b.t - a.t;
+    var u = Math.max(0, Math.min(1, (t - a.t) / h));
+    var h00 = 2 * u * u * u - 3 * u * u + 1;
+    var h10 = u * u * u - 2 * u * u + u;
+    var h01 = -2 * u * u * u + 3 * u * u;
+    var h11 = u * u * u - u * u;
+    var p = [];
+    for (var k = 0; k < 3; k++) {
+        p.push(h00 * a.pos[k] + h10 * h * a.vel[k] + h01 * b.pos[k] + h11 * h * b.vel[k]);
+    }
+    return p;
+}
 
-    var x = (a.pos[0] + (b.pos[0] - a.pos[0]) * frac) * KM_TO_WORLD_UNITS;
-    var y = (a.pos[1] + (b.pos[1] - a.pos[1]) * frac) * KM_TO_WORLD_UNITS;
-    var z = (a.pos[2] + (b.pos[2] - a.pos[2]) * frac) * KM_TO_WORLD_UNITS;
-
-    var sc = Entity.GetByTag("SC");
-    if (sc === null) {
-        Logging.LogError("UpdateOrbit: could not find entity tagged 'SC'.");
+function UpdateOrbit() {
+    if (fleet === null) {
         return;
     }
-    // GMAT is right-handed Z-up, Unity left-handed Y-up: swapping Y and Z converts both.
-    sc.SetPosition(new Vector3(x, z, y), false);
+    elapsedSeconds += ORBIT_TICK_SECONDS;
+    if (elapsedSeconds > windowEnd) {
+        elapsedSeconds = windowEnd;   // hold the last position; rerun tools/run_fleet.py
+        if (!windowEndReported) {
+            Report("fleet: end of the ephemeris window reached");
+            windowEndReported = true;
+        }
+    }
+    for (var n = 0; n < fleetTags.length; n++) {
+        var entity = Entity.GetByTag(fleetTags[n]);
+        if (entity === null) {
+            continue;
+        }
+        var p = PositionAt(fleet[fleetTags[n]], elapsedSeconds);
+        // GMAT is right-handed Z-up, Unity left-handed Y-up: swapping Y and Z converts both.
+        entity.SetPosition(new Vector3(p[0] * KM_TO_WORLD_UNITS, p[2] * KM_TO_WORLD_UNITS,
+            p[1] * KM_TO_WORLD_UNITS), false);
+    }
 }
+
+// ---- Start-up ----
+PlaceCamera();
+Time.SetInterval(`UpdateCamera();`, 0.01);
+// CreateUI();  // off for now: the screen canvas reports size 0x0, so the panels get no area
+HTTPNetworking.Fetch(EPHEMERIS_URL, "OnEphemerisLoaded");

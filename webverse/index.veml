@@ -30,9 +30,22 @@
       <mesh-name>../models/earth.glb</mesh-name>
       <mesh-resource>../models/earth.glb</mesh-resource>
     </entity>
-    <!-- probe.glb is 10.5 x 32.8 x 3.4 units at scale 1 (pivot at its centre). 0.05 makes it
-         0.52 x 1.64 x 0.17 units (~164 km long): hugely exaggerated, but visible. -->
-    <entity xsi:type="mesh" tag="SC" id="2a27392f-4bf2-4d5c-925d-fb7dea9702b2">
+    <!-- Spacecraft: one entity per object in data/fleet.json, tagged with its catalog
+         number (tools/run_fleet.py reads tle/<number>.tle). All use probe.glb, which is
+         10.5 x 32.8 x 3.4 units at scale 1 (pivot at its centre); 0.05 makes it ~164 km
+         long: hugely exaggerated, but visible. Add a tle/ file and an entity here to add one. -->
+    <!-- ISS (ZARYA) -->
+    <entity xsi:type="mesh" tag="25544" id="3e8f1a27-5c4b-4d19-9a6e-7b2c0d8e4f51">
+      <transform xsi:type="scaletransform">
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" w="1" />
+        <scale x="0.05" y="0.05" z="0.05" />
+      </transform>
+      <mesh-name>../models/probe.glb</mesh-name>
+      <mesh-resource>../models/probe.glb</mesh-resource>
+    </entity>
+    <!-- Hubble Space Telescope (HST) -->
+    <entity xsi:type="mesh" tag="20580" id="9b4d6c13-2e7a-4f08-b5c1-6a3e8d2f7c94">
       <transform xsi:type="scaletransform">
         <position x="0" y="0" z="0" />
         <rotation x="0" y="0" z="0" w="1" />
