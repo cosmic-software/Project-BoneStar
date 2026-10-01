@@ -14,8 +14,9 @@ gmat/orbit_default.script  --(headless GMAT run)-->  data/orbit_default.txt
                                                             v
                                                    data/orbit_default.json
                                                             |
-                                                  (fed to WebVerse -- ingestion
-                                                   mechanism TBD)
+                                                            |
+                                          webverse/Scripts/orbit.js fetches it over
+                                          HTTP and moves the probe along it
 ```
 
 ## Layout
@@ -24,6 +25,8 @@ gmat/orbit_default.script  --(headless GMAT run)-->  data/orbit_default.txt
 gmat/     GMAT scenario script(s)
 tools/    Python bridge scripts (GMAT report -> JSON)
 data/     generated ephemeris/JSON output (not committed -- see .gitignore)
+models/   probe.glb (spacecraft), earth.glb (placeholder grid globe, unit radius)
+webverse/ the WebVerse world: index.veml (scene) + Scripts/orbit.js (playback, camera)
 ```
 
 ## Running it
@@ -33,10 +36,36 @@ data/     generated ephemeris/JSON output (not committed -- see .gitignore)
 python tools\gmat_to_webverse.py data\orbit_default.txt SC data\orbit_default.json
 ```
 
-`orbit_default.script` propagates a single spacecraft (SC) in a circular-ish 6778 km,
-51.6 deg LEO orbit for one full period (~93 minutes), reporting position/velocity
+`orbit_default.script` propagates a single spacecraft (SC) from 17 Sep 2026 12:00 UTC in a
+45 deg LEO test orbit -- perigee altitude 350 km, eccentricity 0.02 (SMA 6865.445 km, apogee
+~625 km) -- for one full orbit (~94 minutes, perigee to perigee), reporting position/velocity
 (EarthMJ2000Eq, km and km/s) every 60 seconds. No burns, no targeting -- this is the
 minimal scenario the rest of the pipeline is built around.
+
+### Viewing it in WebVerse
+
+Serve the project root, then open the world directly in the WebVerse address bar:
+
+```
+python -m http.server 8000
+```
+```
+http://localhost:8000/webverse/index.veml
+```
+
+Don't go through a WorldHub `visitworld` link: it forces a WorldHub login first.
+
+Scale is 1 unit = 100 km; the probe model is hugely exaggerated so it stays visible.
+
+| Control | Action |
+|---|---|
+| Left-drag | orbit the camera around the current focus |
+| W / S, = / - , right-drag | zoom |
+| Left arrow | probe view: the camera rides with the probe, 1 unit out |
+| Right arrow, R | Earth view (starts 4 Earth radii out) |
+
+`webverse/panels/` holds an Assets side panel that is written but switched off: in the
+current WebVerse runtime its screen canvas reports a size of 0x0, so the panel gets no area.
 
 ## JSON shape
 

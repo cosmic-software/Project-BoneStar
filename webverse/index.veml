@@ -7,6 +7,10 @@
     <script>Scripts/orbit.js</script>
   </metadata>
   <environment>
+    <!-- No background = the runtime's flat grey; space is black. -->
+    <background>
+      <color>#000000</color>
+    </background>
     <entity xsi:type="light" tag="sun" id="9a6f662f-7b1e-43b7-8eff-52e101d45fb1">
       <transform xsi:type="scaletransform">
         <position x="0" y="75" z="0" />
@@ -14,14 +18,31 @@
         <scale x="1" y="1" z="1" />
       </transform>
     </entity>
+    <!-- Earth: earth.glb is a unit-radius sphere centred on its own origin (the built-in
+         spheremesh pivots at its bottom and ignores color). 1 unit = 100 km, so
+         scale = Earth radius 6378.1363 km = 63.781363 units, centred on the world origin. -->
+    <entity xsi:type="mesh" tag="Earth" id="5d0c3e7a-8b1f-4c2e-9a6d-3f7b1e2c4a90">
+      <transform xsi:type="scaletransform">
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" w="1" />
+        <scale x="63.781363" y="63.781363" z="63.781363" />
+      </transform>
+      <mesh-name>../models/earth.glb</mesh-name>
+      <mesh-resource>../models/earth.glb</mesh-resource>
+    </entity>
+    <!-- probe.glb is 10.5 x 32.8 x 3.4 units at scale 1 (pivot at its centre). 0.05 makes it
+         0.52 x 1.64 x 0.17 units (~164 km long): hugely exaggerated, but visible. -->
     <entity xsi:type="mesh" tag="SC" id="2a27392f-4bf2-4d5c-925d-fb7dea9702b2">
       <transform xsi:type="scaletransform">
         <position x="0" y="0" z="0" />
         <rotation x="0" y="0" z="0" w="1" />
-        <scale x="1" y="1" z="1" />
+        <scale x="0.05" y="0.05" z="0.05" />
       </transform>
       <mesh-name>../models/probe.glb</mesh-name>
       <mesh-resource>../models/probe.glb</mesh-resource>
     </entity>
+    <!-- The Assets panels are created in Scripts/orbit.js, not here: this runtime loads VEML
+         html entities with no parent canvas, and only sizes them when they have one, so they
+         come out 0 x 0 ("CanvasWebViewPrefab dimensions are invalid" in Player.log). -->
   </environment>
 </veml>

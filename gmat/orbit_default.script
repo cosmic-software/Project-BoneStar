@@ -8,13 +8,14 @@
 %----------------------------------------
 
 Create Spacecraft SC;
-GMAT SC.DateFormat = A1Gregorian;
+GMAT SC.DateFormat = UTCGregorian;
 GMAT SC.Epoch = '17 Sep 2026 12:00:00.000';
 GMAT SC.CoordinateSystem = EarthMJ2000Eq;
 GMAT SC.DisplayStateType = Keplerian;
-GMAT SC.SMA = 6777.999999999999;
-GMAT SC.ECC = 0.0009999999999999454;
-GMAT SC.INC = 51.60000000000001;
+% Test orbit: perigee altitude 350 km (Earth radius 6378.1363 km), ecc 0.02, inc 45 deg
+GMAT SC.SMA = 6865.445204;
+GMAT SC.ECC = 0.02;
+GMAT SC.INC = 45;
 GMAT SC.RAAN = 0;
 GMAT SC.AOP = 0;
 GMAT SC.TA = 0;
@@ -186,7 +187,10 @@ BeginMissionSequence;
 
 Report rf SC.ElapsedSecs SC.UTCGregorian SC.EarthMJ2000Eq.X SC.EarthMJ2000Eq.Y SC.EarthMJ2000Eq.Z SC.EarthMJ2000Eq.VX SC.EarthMJ2000Eq.VY SC.EarthMJ2000Eq.VZ Sun.EarthMJ2000Eq.X Sun.EarthMJ2000Eq.Y Sun.EarthMJ2000Eq.Z;
 
-While SC.ElapsedSecs < 5580
+While SC.ElapsedSecs < 5600
    Propagate DefaultProp(SC) {SC.ElapsedSecs = 60};
    Report rf SC.ElapsedSecs SC.UTCGregorian SC.EarthMJ2000Eq.X SC.EarthMJ2000Eq.Y SC.EarthMJ2000Eq.Z SC.EarthMJ2000Eq.VX SC.EarthMJ2000Eq.VY SC.EarthMJ2000Eq.VZ Sun.EarthMJ2000Eq.X Sun.EarthMJ2000Eq.Y Sun.EarthMJ2000Eq.Z;
 EndWhile;
+% Finish exactly one orbit (started at TA = 0) so the viewer's loop closes.
+Propagate DefaultProp(SC) {SC.Periapsis};
+Report rf SC.ElapsedSecs SC.UTCGregorian SC.EarthMJ2000Eq.X SC.EarthMJ2000Eq.Y SC.EarthMJ2000Eq.Z SC.EarthMJ2000Eq.VX SC.EarthMJ2000Eq.VY SC.EarthMJ2000Eq.VZ Sun.EarthMJ2000Eq.X Sun.EarthMJ2000Eq.Y Sun.EarthMJ2000Eq.Z;
