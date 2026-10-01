@@ -21,3 +21,4 @@ Thumbs.db
 # Fleet job output (tools/run_fleet.py)
 data/oem/
 data/*.script
+data/*.csv

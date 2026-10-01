@@ -10,11 +10,14 @@ into data/fleet.json.
 
 The window runs from 1 hour before the run to 12 hours after it, at 60 s steps, so a
 late or missed run still leaves hours of track. GMAT converts SGP4's TEME output, so
-the OEMs (and the JSON) are in EarthMJ2000Eq, the frame the viewer already uses.
+the OEMs (and the JSON) are in EarthMJ2000Eq, the frame the viewer already uses. GMAT
+also reports the Earth's rotation angle and the Sun's direction (data/frames.csv) so the
+viewer can turn the textured Earth and light the day side correctly.
 
 This is the step to schedule (e.g. every 6 hours) once the TLEs are refreshed.
 """
 import json
+import math
 import os
 import subprocess
 import sys
@@ -26,7 +29,10 @@ TLE_DIR = ROOT / "tle"
 OEM_DIR = ROOT / "data" / "oem"
 SCRIPT = ROOT / "data" / "fleet_run.script"
 OUT_JSON = ROOT / "data" / "fleet.json"
+FRAMES = ROOT / "data" / "frames.csv"
 GMAT_CONSOLE = Path(os.environ.get("GMAT_CONSOLE", r"F:\gmat-win-R2026a\bin\GmatConsole.exe"))
+
+EARTH_RATE_DEG_PER_S = 360.98564736629 / 86400.0   # sidereal rotation rate
 
 WINDOW_BEFORE = timedelta(hours=1)
 WINDOW_AFTER = timedelta(hours=12)
@@ -80,6 +86,19 @@ def write_script(fleet, start, end):
               f"GMAT OEM{catalog}.InterpolationOrder = 7;",
               f"GMAT OEM{catalog}.CoordinateSystem = EarthMJ2000Eq;",
               f"GMAT OEM{catalog}.WriteEphemeris = true;", ""]
+    # Frame reference for the viewer: the first spacecraft's position in both the inertial
+    # and the Earth-fixed frame gives the Earth's rotation angle (longitude difference), and
+    # the Sun's inertial position gives the lighting direction.
+    ref = f"SC{fleet[0][1]}"
+    s += ["Create ReportFile Frames;",
+          f"GMAT Frames.Filename = '{FRAMES.as_posix()}';",
+          f"GMAT Frames.Add = {{{ref}.UTCGregorian, {ref}.EarthMJ2000Eq.X, {ref}.EarthMJ2000Eq.Y, "
+          f"{ref}.EarthFixed.X, {ref}.EarthFixed.Y, Sun.EarthMJ2000Eq.X, Sun.EarthMJ2000Eq.Y, "
+          f"Sun.EarthMJ2000Eq.Z}};",
+          "GMAT Frames.Precision = 16;",
+          "GMAT Frames.WriteHeaders = true;",
+          "GMAT Frames.FixedWidth = false;",
+          "GMAT Frames.Delimiter = ',';", ""]
     s += ["BeginMissionSequence;"]
     # One Propagate per spacecraft: the TLE propagator needs all spacecraft in a
     # Propagate to share an epoch, and each TLE has its own.
@@ -105,6 +124,41 @@ def read_oem(path):
             t = datetime.fromisoformat(f[0]).replace(tzinfo=timezone.utc)
             rows.append((t, [float(v) for v in f[1:4]], [float(v) for v in f[4:7]]))
     return frame, rows
+
+
+def read_frames(start, now):
+    """Earth rotation angle at the window start, and the Sun direction at run time.
+
+    The rotation angle is the reference spacecraft's inertial longitude minus its Earth-fixed
+    longitude, i.e. where the Greenwich meridian points in EarthMJ2000Eq. Each row gives one
+    estimate; they are reduced to the window start with the sidereal rate and averaged.
+    (The viewer spins the Earth about the J2000 pole; the true pole is ~0.15 deg away, which
+    is about 16 km at the surface.)
+    """
+    rows, seen = [], set()
+    lines = FRAMES.read_text().splitlines()
+    for line in lines[1:]:
+        f = [v.strip() for v in line.split(",")]
+        if len(f) != 8 or f[0] in seen:
+            continue  # the report repeats rows while the other spacecraft propagate
+        seen.add(f[0])
+        t = datetime.strptime(f[0], "%d %b %Y %H:%M:%S.%f").replace(tzinfo=timezone.utc)
+        rows.append((t, [float(v) for v in f[1:]]))
+    estimates, sun = [], None
+    for t, (xj, yj, xf, yf, sx, sy, sz) in rows:
+        dt = (t - start).total_seconds()
+        if dt < 0:
+            continue
+        angle = math.degrees(math.atan2(yj, xj) - math.atan2(yf, xf)) - EARTH_RATE_DEG_PER_S * dt
+        estimates.append(angle % 360.0)
+        if sun is None or abs((t - now).total_seconds()) < abs((sun[0] - now).total_seconds()):
+            sun = (t, (sx, sy, sz))
+    # circular mean, then the spread of the estimates as a check
+    mean = math.degrees(math.atan2(sum(math.sin(math.radians(a)) for a in estimates),
+                                   sum(math.cos(math.radians(a)) for a in estimates))) % 360.0
+    spread = max(abs((a - mean + 180) % 360 - 180) for a in estimates)
+    norm = math.sqrt(sum(c * c for c in sun[1]))
+    return mean, spread, len(estimates), [c / norm for c in sun[1]]
 
 
 def main():
@@ -134,10 +188,17 @@ def main():
         names[catalog] = name
         print(f"{name} ({catalog}): TLE epoch {epoch:%Y-%m-%d %H:%M} UTC, {len(rows)} states")
 
+    rotation, spread, n, sun_dir = read_frames(start, now)
+    print(f"Earth rotation at window start {rotation:.4f} deg ({n} GMAT samples, max spread "
+          f"{spread:.4f} deg); Sun direction {[round(c, 4) for c in sun_dir]}")
+
     payload = {
         "epoch": start.strftime("%d %b %Y %H:%M:%S.000"),          # UTC; t = seconds after this
         "generated": now.strftime("%d %b %Y %H:%M:%S.000"),
         "generated_t": (now - start).total_seconds(),              # where "now" was at run time
+        # Greenwich meridian's angle from +X (EarthMJ2000Eq) at "epoch", and its rate
+        "earth": {"rotation_deg": rotation, "rate_deg_per_s": EARTH_RATE_DEG_PER_S},
+        "sun_dir": sun_dir,                                        # unit vector, EarthMJ2000Eq
         "names": names,
         "objects": objects,
     }

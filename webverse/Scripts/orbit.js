@@ -16,6 +16,8 @@ var windowEndReported = false;
 // Jint (WebVerse's JS engine) has no Date.now(), so the clock counts UpdateOrbit ticks.
 const ORBIT_TICK_SECONDS = 0.1;
 var elapsedSeconds = 0;   // seconds after the fleet window's epoch
+var earthRotation0 = 0;   // Greenwich meridian's angle from +X at the epoch (deg, from GMAT)
+var earthRate = 0;        // deg/s
 
 // ---- Orbit camera ----
 // VEML has no camera element -- the runtime owns the camera and scripts place it.
@@ -86,7 +88,7 @@ function SetFocus(tag) {
     focusTag = tag;
     camDistance = Framing(tag).start;
     PlaceCamera();
-    PanelCall("assets-panel", "setSelected('" + tag + "')");
+    HudSelect(tag);
     Report("focus " + tag + (fleetNames[tag] ? " (" + fleetNames[tag] + ")" : "")
         + " dist " + camDistance + " parent scale " + focusScale);
 }
@@ -141,85 +143,223 @@ function UpdateCamera() {
     if (changed) {
         PlaceCamera();
     }
+    UpdateLabels();
+    UpdateHud();
 }
 
 // ---- Assets panel ----
-// Two screen-space HTML panels docked on the right edge: a tab that is always shown, and
-// the asset list it opens and closes. They are created here inside a screen canvas because
-// html entities declared in VEML get no parent canvas and are never sized (see index.veml).
-// Both post JSON strings to OnPanelMessage; the world answers by running JavaScript in the
-// panel -- HTMLEntity has no SendMessage.
-var assetsOpen = true;
+// A heads-up panel built from the runtime's own text and buttons (the approach in Dylan Baker's
+// WebVerse samples) on a WORLD-space canvas kept just in front of the camera. Screen-space
+// canvases never showed up in this runtime (the HTML panels loaded but stayed invisible),
+// while world-space canvases do -- the spacecraft labels use one.
+// Each row is a text with a translucent button laid over it: the runtime's button is an image
+// with no text, and a text on top would take the click, so the text goes underneath.
+const HUD_DISTANCE = 0.6;     // in front of the camera: past its 0.3 near plane, nearer than any
+                              // spacecraft (closest zoom is 0.9 units)
+// Placement in view units at HUD_DISTANCE. Measured from a 1903x1025 screenshot: ~1459 px per
+// unit (so the vertical FOV is ~59 deg) and the view centre at ~(953, 496) px. The top edge
+// sits below WebVerse's address bar (~150 px from the top of the window), the right edge ~210
+// px in from the right. It scales with the window, since it is fixed in angle, not pixels.
+const HUD_RIGHT_EDGE = 0.505;
+const HUD_TOP_EDGE = 0.237;
+const HUD_WORLD_WIDTH = 0.165;
+// Layout in canvas units: header, then one row per asset; the height fits the rows.
+const HUD_W = 500;
+const HUD_PAD = 12;
+const HUD_ROW = 80;
+const HUD_GAP = 12;
+const HUD_FONT = 44;
+// A button's image is white until coloured with SetBaseColor; SetColors only sets the hover /
+// press TINTS (multiplied onto the image, and only applied on a state change), so tints are
+// kept near white and the real colours go on the image.
+const ROW_COLOR = new Color(1, 1, 1, 0.06);
+const ROW_SELECTED = new Color(0.5, 0.7, 1, 0.35);
+const PANEL_COLOR = new Color(0.08, 0.09, 0.13, 0.85);
+const TINT_NORMAL = new Color(1, 1, 1, 1);
+const TINT_HOVER = new Color(1.6, 1.6, 1.6, 1);
+const TINT_PRESS = new Color(0.8, 0.8, 0.8, 1);
+var hud = null;               // { canvas, background, header, rows: [ { tag, text, button } ] }
+var hudOpen = true;
 
-// Called at the end of start-up: the engine fires these onLoaded callbacks synchronously
-// inside Create(), so everything they use must already be defined.
-function CreateUI() {
-    CanvasEntity.Create(null, new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1), new Vector3(1, 1, 1),
-        false, null, "ui-canvas", "OnCanvasLoaded");
+function MakeRowButton(canvas, onClick, x, y, w, h, color) {
+    var button = ButtonEntity.Create(canvas, onClick, new Vector2(x, y), new Vector2(w, h));
+    button.SetVisibility(true);
+    button.SetBaseColor(color);
+    button.SetColors(TINT_NORMAL, TINT_HOVER, TINT_PRESS, TINT_NORMAL);
+    return button;
 }
 
-var uiCanvas = null;
+function MakeText(canvas, words, x, y, w, h, color) {
+    var text = TextEntity.Create(canvas, words, HUD_FONT, new Vector2(x, y), new Vector2(w, h));
+    text.SetVisibility(true);
+    text.SetColor(color);
+    text.SetTextAlignment(TextAlignment.Center);
+    return text;
+}
 
-function OnCanvasLoaded(canvas) {
-    // Script-created entities start hidden (the VEML loader shows its own); a hidden canvas
-    // keeps its web views from ever initialising.
+// Called once the fleet is loaded, so the rows can use the spacecraft names.
+function CreateHud() {
+    var canvas = CanvasEntity.Create(null, new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+        new Vector3(1, 1, 1), false, null, "assets-hud");
     canvas.SetVisibility(true);
-    canvas.MakeScreenCanvas();
-    uiCanvas = canvas;
-    var size = canvas.GetSize();
-    Report("ui: canvas created, screen canvas " + canvas.IsScreenCanvas() + ", size now " + size.x + "x" + size.y);
-    // Panels are sized from the canvas's size at creation, and a new screen canvas only takes
-    // the screen's size on Unity's next layout pass -- so create them a moment later.
-    Time.SetTimeout(`CreatePanels();`, 500);   // milliseconds
-}
-
-function CreatePanels() {
-    var size = uiCanvas.GetSize();
-    Report("ui: creating panels, canvas size " + size.x + "x" + size.y);
-    // Positions/sizes are fractions of the screen; position is the panel's centre,
-    // measured from the top-left corner.
-    HTMLEntity.Create(uiCanvas, new Vector2(0.98, 0.3), new Vector2(0.035, 0.16),
-        null, "assets-tab", "OnPanelMessage", "OnTabLoaded");
-    HTMLEntity.Create(uiCanvas, new Vector2(0.87, 0.3), new Vector2(0.17, 0.36),
-        null, "assets-panel", "OnPanelMessage", "OnAssetsPanelLoaded");
-}
-
-function OnTabLoaded(panel) {
-    panel.SetVisibility(true);
-    panel.LoadFromURL("panels/assets-tab.html");
-    Report("ui: assets-tab created");
-}
-
-function OnAssetsPanelLoaded(panel) {
-    panel.SetVisibility(true);
-    panel.LoadFromURL("panels/assets.html");
-    Report("ui: assets-panel created");
-}
-
-function PanelCall(tag, js) {
-    var panel = Entity.GetByTag(tag);
-    if (panel !== null) {
-        panel.ExecuteJavaScript(js, "");
+    canvas.MakeWorldCanvas();
+    var entries = [{ tag: "Earth", name: "Earth" }];
+    for (var n = 0; n < fleetTags.length; n++) {
+        entries.push({ tag: fleetTags[n], name: fleetNames[fleetTags[n]] || fleetTags[n] });
     }
+    var height = HUD_PAD + (entries.length + 1) * (HUD_ROW + HUD_GAP) + HUD_PAD;
+    canvas.SetSize(new Vector2(HUD_W, height));
+    hud = { canvas: canvas, rows: [], height: height };
+    var fx = HUD_PAD / HUD_W, fw = 1 - 2 * fx, fh = HUD_ROW / height;
+    // Children are attached keeping their world size, so the canvas must still be at scale 1
+    // while they are created; it is shrunk (PlaceHud) only afterwards. Shrinking it first gave
+    // every child a ~2270x local scale and the panel filled the whole view.
+    // Created first, so it is drawn underneath everything else (and its clicks do nothing).
+    hud.background = MakeRowButton(canvas, "", 0, 0, 1, 1, PANEL_COLOR);
+    var fy = HUD_PAD / height;
+    hud.header = MakeText(canvas, "ASSETS  -", fx, fy, fw, fh, new Color(0.5, 0.7, 1, 1));
+    hud.headerButton = MakeRowButton(canvas, "ToggleAssets();", fx, fy, fw, fh, ROW_COLOR);
+    for (var i = 0; i < entries.length; i++) {
+        var y = (HUD_PAD + (i + 1) * (HUD_ROW + HUD_GAP)) / height;
+        var text = MakeText(canvas, entries[i].name, fx, y, fw, fh, new Color(1, 1, 1, 1));
+        var button = MakeRowButton(canvas, "SelectAsset('" + entries[i].tag + "');",
+            fx, y, fw, fh, ROW_COLOR);
+        hud.rows.push({ tag: entries[i].tag, text: text, button: button });
+    }
+    HudSelect(focusTag);
+    PlaceHud();
+    Report("hud: created with " + entries.length + " rows");
+    Time.SetTimeout(`ReportHud();`, 2000);   // milliseconds
 }
 
-function OnPanelMessage(message) {
-    var data;
-    try {
-        data = JSON.parse(message);
-    } catch (e) {
-        Report("panel: non-JSON message " + message);
+function ReportHud() {
+    var sc = hud.canvas.GetScale();
+    var p = hud.canvas.GetPosition(false);
+    var c = Camera.GetPosition(false);
+    var dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z;
+    var child = hud.rows[0].button.GetScale();
+    Report("hud: scale " + sc.x.toFixed(6) + " (want " + (HUD_WORLD_WIDTH / HUD_W).toFixed(6)
+        + "), row button local scale " + child.x.toFixed(3) + " (want 1), distance from camera "
+        + Math.sqrt(dx * dx + dy * dy + dz * dz).toFixed(3));
+}
+
+function SelectAsset(tag) {
+    Report("hud: clicked " + tag);
+    SetFocus(tag);
+}
+
+function ToggleAssets() {
+    hudOpen = !hudOpen;
+    hud.background.SetVisibility(hudOpen);
+    for (var i = 0; i < hud.rows.length; i++) {
+        hud.rows[i].text.SetVisibility(hudOpen);
+        hud.rows[i].button.SetVisibility(hudOpen);
+    }
+    hud.header.SetText(hudOpen ? "ASSETS  -" : "ASSETS  +");
+    Report("hud: " + (hudOpen ? "opened" : "closed"));
+}
+
+// Highlight the row the camera is centred on.
+function HudSelect(tag) {
+    if (hud === null) {
         return;
     }
-    if (data.type === "toggle-assets") {
-        assetsOpen = !assetsOpen;
-        var panel = Entity.GetByTag("assets-panel");
-        if (panel !== null) {
-            panel.SetVisibility(assetsOpen);
+    for (var i = 0; i < hud.rows.length; i++) {
+        hud.rows[i].button.SetBaseColor(hud.rows[i].tag === tag ? ROW_SELECTED : ROW_COLOR);
+    }
+}
+
+// v rotated by quaternion q
+function Rotate(q, x, y, z) {
+    var tx = 2 * (q.y * z - q.z * y), ty = 2 * (q.z * x - q.x * z), tz = 2 * (q.x * y - q.y * x);
+    return [x + q.w * tx + (q.y * tz - q.z * ty),
+            y + q.w * ty + (q.z * tx - q.x * tz),
+            z + q.w * tz + (q.x * ty - q.y * tx)];
+}
+
+// Keep the panel fixed in the top-right of the view, facing the camera.
+function UpdateHud() {
+    if (hud === null) {
+        return;
+    }
+    PlaceHud();
+}
+
+function PlaceHud() {
+    var s = HUD_WORLD_WIDTH / HUD_W;
+    hud.canvas.SetScale(new Vector3(s, s, s), false);
+    var q = Camera.GetRotation(false);
+    var p = Camera.GetPosition(false);
+    var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
+    // centre of the panel, from its fixed top-right corner
+    var right = HUD_RIGHT_EDGE - HUD_WORLD_WIDTH / 2;
+    var up = HUD_TOP_EDGE - HUD_WORLD_WIDTH * hud.height / HUD_W / 2;
+    hud.canvas.SetPosition(new Vector3(
+        p.x + f[0] * HUD_DISTANCE + r[0] * right + u[0] * up,
+        p.y + f[1] * HUD_DISTANCE + r[1] * right + u[1] * up,
+        p.z + f[2] * HUD_DISTANCE + r[2] * right + u[2] * up), false);
+    hud.canvas.SetRotation(q, false);
+}
+
+// ---- Spacecraft labels ----
+// One small world-space canvas per spacecraft with its name. Each tick it is placed just
+// above its spacecraft, turned to face the camera, and scaled with the camera distance so
+// it reads the same size from the Earth view and from up close.
+// Runtime details (StraightFour source): script-made canvases and text start hidden, text
+// starts black, a world canvas needs an explicit size (text is sized as a fraction of it),
+// and text positions are measured from the canvas's top-left corner.
+const LABEL_W = 400;            // canvas size, in canvas units
+const LABEL_H = 80;
+const LABEL_FONT = 40;
+const LABEL_WIDTH_PER_DISTANCE = 0.12;   // label width as a fraction of camera distance
+const LABEL_RAISE_PER_DISTANCE = 0.03;   // gap above the spacecraft, same units
+var labels = {};                // tag -> { canvas, text }
+var pendingLabelTag = null;     // onLoaded callbacks fire synchronously inside Create()
+
+function CreateLabels() {
+    for (var n = 0; n < fleetTags.length; n++) {
+        pendingLabelTag = fleetTags[n];
+        CanvasEntity.Create(null, new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1), new Vector3(1, 1, 1),
+            false, null, "label-" + fleetTags[n], "OnLabelCanvasLoaded");
+    }
+}
+
+function OnLabelCanvasLoaded(canvas) {
+    var tag = pendingLabelTag;
+    canvas.SetVisibility(true);
+    canvas.MakeWorldCanvas();
+    canvas.SetSize(new Vector2(LABEL_W, LABEL_H));
+    labels[tag] = { canvas: canvas, text: null };
+    TextEntity.Create(canvas, fleetNames[tag] || tag, LABEL_FONT, new Vector2(0, 0), new Vector2(1, 1),
+        null, "label-text-" + tag, "OnLabelTextLoaded");
+}
+
+function OnLabelTextLoaded(text) {
+    var tag = pendingLabelTag;
+    text.SetVisibility(true);
+    text.SetColor(new Color(1, 1, 1, 1));
+    text.SetTextAlignment(TextAlignment.Center);
+    labels[tag].text = text;
+    var size = labels[tag].canvas.GetSize();
+    Report("label: " + tag + " (" + fleetNames[tag] + ") canvas " + size.x + "x" + size.y);
+}
+
+function UpdateLabels() {
+    var cam = Camera.GetPosition(false);
+    var camRot = Camera.GetRotation(false);
+    for (var tag in labels) {
+        var entity = Entity.GetByTag(tag);
+        if (entity === null) {
+            continue;
         }
-        PanelCall("assets-tab", "setOpen(" + assetsOpen + ")");
-    } else if (data.type === "select-asset") {
-        SetFocus(data.tag);
+        var p = entity.GetPosition(false);
+        var dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z;
+        var dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        var scale = LABEL_WIDTH_PER_DISTANCE * dist / LABEL_W;
+        var canvas = labels[tag].canvas;
+        canvas.SetPosition(new Vector3(p.x, p.y + LABEL_RAISE_PER_DISTANCE * dist, p.z), false);
+        canvas.SetRotation(camRot, false);
+        canvas.SetScale(new Vector3(scale, scale, scale), false);
     }
 }
 
@@ -257,9 +397,53 @@ function OnEphemerisLoaded(body) {
         }
     }
     elapsedSeconds = parsed.generated_t;   // start where "now" was when the fleet job ran
+    earthRotation0 = parsed.earth.rotation_deg;
+    earthRate = parsed.earth.rate_deg_per_s;
+    PointSun(parsed.sun_dir);
     Report("fleet: " + fleetTags.join(",") + " window from " + parsed.epoch + " UTC, starting at t "
         + elapsedSeconds + " s (" + parsed.generated + " UTC)");
+    CreateLabels();
+    CreateHud();
     Time.SetInterval(`UpdateOrbit();`, ORBIT_TICK_SECONDS);
+}
+
+// The VEML light is created as a Unity point light (the runtime's default), which doesn't
+// reach the Earth at this scale. Make it a directional sun shining from GMAT's Sun direction.
+// WebVerse gives VEML worlds no ambient control (ambient comes from its default sky and is
+// never recomputed), so an ambient of 0.2 is emulated: earth.glb and probe.glb have their
+// base colours scaled by 0.2 and the sun is raised by 1/0.2. Day side: as bright as with a
+// 2.5 sun; night side (ambient only): 20% of what it was.
+const AMBIENT_EQUIVALENT = 0.2;
+const SUN_INTENSITY = 2.5 / AMBIENT_EQUIVALENT;
+
+function PointSun(sunDir) {
+    var sun = Entity.GetByTag("sun");
+    if (sun === null) {
+        Report("sun: no entity tagged sun");
+        return;
+    }
+    sun.SetLightType(LightType.Directional);
+    // Scripts can't lower the scene's ambient light, so the night side stays fairly lit; a
+    // bright sun is what makes the day side and the terminator stand out.
+    var propsSet = sun.SetLightProperties(new Color(1, 1, 1, 1), 6500, SUN_INTENSITY);
+    // GMAT -> Unity axes (swap Y and Z); the light shines along its forward axis, away from the Sun.
+    var fx = -sunDir[0], fy = -sunDir[2], fz = -sunDir[1];
+    var pitch = Math.asin(-fy) * 180 / Math.PI;
+    var yaw = Math.atan2(fx, fz) * 180 / Math.PI;
+    sun.SetEulerRotation(new Vector3(pitch, yaw, 0), false);
+    Report("sun: directional, pitch " + pitch.toFixed(2) + " yaw " + yaw.toFixed(2)
+        + ", intensity " + SUN_INTENSITY + " set " + propsSet);
+}
+
+// Turn the Earth so its texture's Greenwich meridian points where GMAT says it does.
+// A GMAT rotation of +angle about Z is a Unity rotation of -angle about Y (axes swapped).
+function RotateEarth(t) {
+    var earth = Entity.GetByTag("Earth");
+    if (earth === null) {
+        return;
+    }
+    var half = -(earthRotation0 + earthRate * t) * Math.PI / 360;
+    earth.SetRotation(new Quaternion(0, Math.sin(half), 0, Math.cos(half)), false);
 }
 
 // Position (km) at time t on one track: cubic Hermite between the bracketing states, using
@@ -296,6 +480,7 @@ function UpdateOrbit() {
             windowEndReported = true;
         }
     }
+    RotateEarth(elapsedSeconds);
     for (var n = 0; n < fleetTags.length; n++) {
         var entity = Entity.GetByTag(fleetTags[n]);
         if (entity === null) {
@@ -311,5 +496,4 @@ function UpdateOrbit() {
 // ---- Start-up ----
 PlaceCamera();
 Time.SetInterval(`UpdateCamera();`, 0.01);
-// CreateUI();  // off for now: the screen canvas reports size 0x0, so the panels get no area
 HTTPNetworking.Fetch(EPHEMERIS_URL, "OnEphemerisLoaded");

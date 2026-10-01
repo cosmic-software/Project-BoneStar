@@ -30,6 +30,19 @@
       <mesh-name>../models/earth.glb</mesh-name>
       <mesh-resource>../models/earth.glb</mesh-resource>
     </entity>
+    <!-- Atmospheric glow: four nearly transparent blue shells at 38-191 km (1.006-1.030 Earth
+         radii), same centre and scale as the Earth. Thin over the face of the globe, thicker at
+         the edge where the line of sight crosses every shell twice; lit by the same sun, so it
+         fades on the night side. Spacecraft (~420+ km) stay outside it. -->
+    <entity xsi:type="mesh" tag="Atmosphere" id="6f2a9c41-8d3e-4b57-a1c6-0e5d7b3f9a28">
+      <transform xsi:type="scaletransform">
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" w="1" />
+        <scale x="63.781363" y="63.781363" z="63.781363" />
+      </transform>
+      <mesh-name>../models/atmosphere.glb</mesh-name>
+      <mesh-resource>../models/atmosphere.glb</mesh-resource>
+    </entity>
     <!-- Spacecraft: one entity per object in data/fleet.json, tagged with its catalog
          number (tools/run_fleet.py reads tle/<number>.tle). All use probe.glb, which is
          10.5 x 32.8 x 3.4 units at scale 1 (pivot at its centre); 0.05 makes it ~164 km
@@ -54,8 +67,9 @@
       <mesh-name>../models/probe.glb</mesh-name>
       <mesh-resource>../models/probe.glb</mesh-resource>
     </entity>
-    <!-- The Assets panels are created in Scripts/orbit.js, not here: this runtime loads VEML
-         html entities with no parent canvas, and only sizes them when they have one, so they
-         come out 0 x 0 ("CanvasWebViewPrefab dimensions are invalid" in Player.log). -->
+    <!-- The Assets panel and the spacecraft name labels are built in Scripts/orbit.js from the
+         runtime's own text and buttons on world-space canvases. (VEML html entities were tried
+         first: this runtime loads them with no parent canvas and gives them no size:
+         "CanvasWebViewPrefab dimensions are invalid" in Player.log.) -->
   </environment>
 </veml>
