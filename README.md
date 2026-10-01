@@ -57,3 +57,7 @@ minimal scenario the rest of the pipeline is built around.
 Working end-to-end for a single default orbit. Planned: a scheduled task re-running
 GMAT every 6 hours to refresh the ephemeris, and a bridge into WebVerse (WorldOS /
 MetaWorld) once the ingestion contract on that side is confirmed.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
