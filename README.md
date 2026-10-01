@@ -29,7 +29,7 @@ data/     generated ephemeris/JSON output (not committed -- see .gitignore)
 ## Running it
 
 ```
-"G:\gmat-win-R2026a\bin\GmatConsole.exe" --run gmat\orbit_default.script
+"F:\gmat-win-R2026a\bin\GmatConsole.exe" --run gmat\orbit_default.script
 python tools\gmat_to_webverse.py data\orbit_default.txt SC data\orbit_default.json
 ```
 
