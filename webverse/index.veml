@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<veml xmlns="http://www.fivesqd.com/schemas/veml/3.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <metadata>
+    <title>Project BoneStar</title>
+    <capability>javascript</capability>
+    <script>Scripts/orbit.js</script>
+  </metadata>
+  <environment>
+    <entity xsi:type="light" tag="sun" id="9a6f662f-7b1e-43b7-8eff-52e101d45fb1">
+      <transform xsi:type="scaletransform">
+        <position x="0" y="75" z="0" />
+        <rotation x="0.4177" y="-0.2506" z="0" w="0.8733" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+    </entity>
+    <entity xsi:type="mesh" tag="SC" id="2a27392f-4bf2-4d5c-925d-fb7dea9702b2">
+      <transform xsi:type="scaletransform">
+        <position x="0" y="0" z="0" />
+        <rotation x="0" y="0" z="0" w="1" />
+        <scale x="1" y="1" z="1" />
+      </transform>
+      <mesh-name>../models/probe.glb</mesh-name>
+      <mesh-resource>../models/probe.glb</mesh-resource>
+    </entity>
+  </environment>
+</veml>
