@@ -18,6 +18,7 @@ This is the step to schedule (e.g. every 6 hours) once the TLEs are refreshed.
 """
 import json
 import math
+import struct
 import os
 import subprocess
 import sys
@@ -30,6 +31,12 @@ OEM_DIR = ROOT / "data" / "oem"
 SCRIPT = ROOT / "data" / "fleet_run.script"
 OUT_JSON = ROOT / "data" / "fleet.json"
 FRAMES = ROOT / "data" / "frames.csv"
+TRACK_DIR = ROOT / "data" / "tracks"
+MU_EARTH = 398600.4415          # km^3/s^2
+KM_TO_UNITS = 1 / 100           # viewer scale: 1 unit = 100 km
+TRACK_STEP = 20                 # s between orbit-line points (Hermite-interpolated)
+TRACK_COLOURS = [(1.00, 0.62, 0.20), (0.35, 0.95, 0.55), (0.95, 0.40, 0.80),
+                 (0.40, 0.75, 1.00), (1.00, 0.90, 0.30), (0.75, 0.55, 1.00)]
 GMAT_CONSOLE = Path(os.environ.get("GMAT_CONSOLE", r"F:\gmat-win-R2026a\bin\GmatConsole.exe"))
 
 EARTH_RATE_DEG_PER_S = 360.98564736629 / 86400.0   # sidereal rotation rate
@@ -161,6 +168,53 @@ def read_frames(start, now):
     return mean, spread, len(estimates), [c / norm for c in sun[1]]
 
 
+def hermite(a, b, t):
+    """Position (km) between two states at time t, using their velocities."""
+    h = b[0] - a[0]; u = (t - a[0]) / h
+    h00, h10 = 2 * u ** 3 - 3 * u ** 2 + 1, u ** 3 - 2 * u ** 2 + u
+    h01, h11 = -2 * u ** 3 + 3 * u ** 2, u ** 3 - u ** 2
+    return [h00 * a[1][k] + h10 * h * a[2][k] + h01 * b[1][k] + h11 * h * b[2][k] for k in range(3)]
+
+
+def write_track(catalog, states, centre_t, colour, name):
+    """data/tracks/<name>.glb: one orbital period of the trajectory, centred on centre_t, as
+    an unlit, opaque glTF LINE_STRIP in viewer units (GMAT X,Y,Z -> Unity X,Z,Y; glTF X is then
+    negated because glTFast mirrors X on import)."""
+    t0, p0, v0 = states[0]
+    r, v2 = math.sqrt(sum(c * c for c in p0)), sum(c * c for c in v0)
+    a = 1 / (2 / r - v2 / MU_EARTH)
+    period = 2 * math.pi * math.sqrt(a ** 3 / MU_EARTH)
+    lo = max(states[0][0], centre_t - period / 2)
+    hi = min(states[-1][0], lo + period)
+    pts, i, t = [], 0, lo
+    while t <= hi:
+        while i < len(states) - 2 and states[i + 1][0] <= t:
+            i += 1
+        x, y, z = hermite(states[i], states[i + 1], t)
+        pts.append((-x * KM_TO_UNITS, z * KM_TO_UNITS, y * KM_TO_UNITS))
+        t += TRACK_STEP
+    data = b"".join(struct.pack("<3f", *q) for q in pts)
+    gltf = {
+        "asset": {"version": "2.0", "generator": "BoneStar tools/run_fleet.py"},
+        "extensionsUsed": ["KHR_materials_unlit"],
+        "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0, "name": f"Track{catalog}"}],
+        "meshes": [{"name": f"Track{catalog}", "primitives": [{"attributes": {"POSITION": 0}, "mode": 3, "material": 0}]}],
+        "materials": [{"name": "Track", "extensions": {"KHR_materials_unlit": {}},
+                       "pbrMetallicRoughness": {"baseColorFactor": list(colour) + [1], "metallicFactor": 0, "roughnessFactor": 1}}],
+        "buffers": [{"byteLength": len(data)}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": len(data), "target": 34962}],
+        "accessors": [{"bufferView": 0, "componentType": 5126, "count": len(pts), "type": "VEC3",
+                       "min": [min(q[k] for q in pts) for k in range(3)], "max": [max(q[k] for q in pts) for k in range(3)]}],
+    }
+    js = json.dumps(gltf, separators=(",", ":")).encode()
+    js += b" " * (-len(js) % 4)
+    glb = struct.pack("<III", 0x46546C67, 2, 12 + 8 + len(js) + 8 + len(data))
+    glb += struct.pack("<II", len(js), 0x4E4F534A) + js + struct.pack("<II", len(data), 0x004E4942) + data
+    TRACK_DIR.mkdir(parents=True, exist_ok=True)
+    (TRACK_DIR / f"{name}.glb").write_bytes(glb)
+    return period, len(pts)
+
+
 def main():
     fleet = read_tles()
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
@@ -188,6 +242,28 @@ def main():
         names[catalog] = name
         print(f"{name} ({catalog}): TLE epoch {epoch:%Y-%m-%d %H:%M} UTC, {len(rows)} states")
 
+    # Orbit lines: one period each, centred every half period across the window, so the viewer
+    # can always show the one centred nearest "now" (orbits precess, e.g. ISS ~5 deg/day, so a
+    # single line drifts off its spacecraft within hours).
+    tracks = {}
+    TRACK_DIR.mkdir(parents=True, exist_ok=True)
+    for old in TRACK_DIR.glob("*.glb"):
+        old.unlink()
+    for k, (name, catalog, _, _) in enumerate(fleet):
+        rows = [(o["t"], o["pos"], o["vel"]) for o in objects[catalog]]
+        colour = TRACK_COLOURS[k % len(TRACK_COLOURS)]
+        p0, v0 = rows[0][1], rows[0][2]
+        a = 1 / (2 / math.sqrt(sum(c * c for c in p0)) - sum(c * c for c in v0) / MU_EARTH)
+        period = 2 * math.pi * math.sqrt(a ** 3 / MU_EARTH)
+        segments, centre, n = [], rows[0][0] + period / 2, 0
+        while centre <= rows[-1][0] - period / 2 + 1e-6:
+            seg = f"{catalog}_{now:%Y%m%d%H%M}_{n:02d}"   # unique per run: WebVerse caches models by URL
+            write_track(catalog, rows, centre, colour, seg)
+            segments.append({"file": f"data/tracks/{seg}.glb", "t": round(centre, 1)})
+            centre += period / 2; n += 1
+        tracks[catalog] = {"colour": colour, "period": round(period, 1), "segments": segments}
+        print(f"{name}: {len(segments)} orbit lines, period {period / 60:.1f} min")
+
     rotation, spread, n, sun_dir = read_frames(start, now)
     print(f"Earth rotation at window start {rotation:.4f} deg ({n} GMAT samples, max spread "
           f"{spread:.4f} deg); Sun direction {[round(c, 4) for c in sun_dir]}")
@@ -200,6 +276,7 @@ def main():
         "earth": {"rotation_deg": rotation, "rate_deg_per_s": EARTH_RATE_DEG_PER_S},
         "sun_dir": sun_dir,                                        # unit vector, EarthMJ2000Eq
         "names": names,
+        "tracks": tracks,                                          # orbit lines, one per half period
         "objects": objects,
     }
     OUT_JSON.write_text(json.dumps(payload))

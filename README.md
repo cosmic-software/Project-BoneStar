@@ -31,7 +31,9 @@ webverse/Scripts/orbit.js        fetches it over HTTP and flies each spacecraft 
 
 ```
 tle/      input TLEs, one file per spacecraft: name line + the two element lines
-tools/    run_fleet.py (the fleet job), gmat_to_webverse.py (single-orbit demo converter)
+tools/    run_fleet.py (the fleet job), update_tles.py (refresh TLEs from CelesTrak),
+          serve.py (local server for the viewer, with the update action),
+          gmat_to_webverse.py (single-orbit demo converter)
 gmat/     GMAT scenario scripts (the single-orbit demo)
 data/     generated output: OEMs, JSON, the generated GMAT script (not committed)
 models/   probe.glb (spacecraft), earth.glb (NASA Blue Marble globe, unit radius),
@@ -49,8 +51,18 @@ python tools\run_fleet.py
 ```
 
 It checks each TLE (line length, checksum), writes `data/fleet_run.script`, runs
-GmatConsole headless, and writes `data/oem/*.oem` and `data/fleet.json`. This is the step
-to schedule, e.g. every 6 hours after refreshing the TLEs.
+GmatConsole headless, and writes `data/oem/*.oem`, `data/fleet.json` and the orbit lines
+(`data/tracks/`). This is the step to schedule, e.g. every 6 hours after refreshing the TLEs.
+
+To refresh the TLEs first:
+
+```
+python tools\update_tles.py
+```
+
+It downloads the current TLE for each catalog number in `tle/` from CelesTrak and replaces
+a file only if the download is valid (lengths, checksums, catalog number) and newer. The
+viewer's **Update TLEs** button runs both steps (see below).
 
 GMAT reads TLEs through its SGP4 propagator plugin (`SPICESGP4`) but does not write them;
 it writes the OEM ephemeris files, which carry GMAT's own trajectory.
@@ -63,10 +75,11 @@ sidereal-time formula: within 0.02 deg.
 
 ### Viewing it in WebVerse
 
-Serve the project root, then open the world directly in the WebVerse address bar:
+Start the local server (it serves the project root and runs updates for the viewer), then
+open the world directly in the WebVerse address bar:
 
 ```
-python -m http.server 8000
+python tools\serve.py
 ```
 ```
 http://localhost:8000/webverse/index.veml
@@ -116,6 +129,19 @@ What you see:
 | Left arrow | next spacecraft: the camera rides with it, 1 unit out |
 | Right arrow, R | Earth view (starts 4 Earth radii out) |
 | G | atmosphere (glow and night side) on / off |
+| Orbit lines row, O | show / hide each spacecraft's orbit (one period, centred on it) |
+| Update TLEs row | fetch fresh TLEs, rerun GMAT, reload the viewer (about 3-20 s) |
+
+**Orbit lines**: the fleet job writes, per spacecraft, one-orbit lines centred every half
+period across the window, and the viewer shows the one centred nearest the current time.
+Orbits slowly turn (the ISS's by about 5 deg a day), so a single fixed line would drift off
+its spacecraft within hours. Line files are named per run, so WebVerse's model cache never
+shows old lines after an update.
+
+**Update TLEs**: asks `tools/serve.py` (`GET /api/update`) to run `update_tles.py` and then
+`run_fleet.py`. When it finishes, the viewer reloads `data/fleet.json` in place (positions,
+Earth rotation, Sun, orbit lines) and playback restarts at the new run time. The row shows
+"Updating...", then "Updated HH:MM UTC" or "Update failed".
 
 Lighting: WebVerse gives a VEML world no control over ambient light (it comes from the
 runtime's default sky). So the models' base colours are scaled down (Earth 0.4) and the sun
@@ -144,6 +170,8 @@ Its label and its row in the Assets panel are added automatically.
   "earth": { "rotation_deg": 262.58, "rate_deg_per_s": 0.0041780746 },
   "sun_dir": [-0.9898, -0.1308, -0.0567],
   "names": { "25544": "ISS (ZARYA)", "20580": "HST" },
+  "tracks": { "25544": { "colour": [1, 0.62, 0.2], "period": 5577.0,
+                         "segments": [ {"file": "data/tracks/25544_<run>_00.glb", "t": 2788.5}, ... ] } },
   "objects": {
     "25544": [
       {"t": 0, "pos": [x, y, z], "vel": [vx, vy, vz]},
@@ -156,7 +184,8 @@ Its label and its row in the Assets panel are added automatically.
 `t` is seconds after `epoch` (UTC); positions are km and velocities km/s in EarthMJ2000Eq.
 `generated_t` is where the run time falls in the window, and is where playback starts.
 `earth.rotation_deg` is the Greenwich meridian's angle from +X at `epoch`; `sun_dir` is a
-unit vector toward the Sun at run time.
+unit vector toward the Sun at run time. `tracks` lists each spacecraft's orbit-line files and
+the time (`t`, seconds after `epoch`) each one is centred on.
 
 ## Also included: single-orbit demo
 
@@ -189,8 +218,9 @@ Known issues:
   copy after a model changes; delete the cached file to force a fresh download. (Don't add
   `?v=...` to model URLs: the cache can't store the name and the world fails to load.)
 
-Not built yet: a real-time clock sync (the viewer counts forward from the job's run time)
-and scheduling the fleet job.
+Not built yet: a real-time clock sync (the viewer counts forward from the job's run time,
+so press Update TLEs, or rerun the fleet job, to bring it back to "now") and scheduling the
+fleet job.
 
 The Assets panel is drawn on a world-space canvas kept in front of the camera. Screen-space
 panels (HTML) were tried first and never became visible in this runtime.

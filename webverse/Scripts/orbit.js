@@ -31,6 +31,7 @@ var earthRate = 0;        // deg/s
 //   Right arrow          Earth view
 //   R                    back to the starting view (Earth)
 //   G                    atmosphere (glow and night side) on / off
+//   O                    orbit lines on / off (also the Assets panel checkbox)
 const EARTH_RADIUS = 6378.1363 * KM_TO_WORLD_UNITS;
 const START_YAW = 0;
 const START_PITCH = 15;
@@ -101,6 +102,7 @@ function Zoom(factor) {
 
 var leftWasDown = false;
 var gWasDown = false;
+var oWasDown = false;
 var atmosphereOn = true;
 
 function UpdateCamera() {
@@ -133,6 +135,12 @@ function UpdateCamera() {
         SetFocus(fleetTags[next]);
         return;
     }
+    // O: orbit lines on/off
+    var oDown = Input.GetKeyValue("o");
+    if (oDown && !oWasDown) {
+        ToggleOrbits();
+    }
+    oWasDown = oDown;
     // G: atmosphere glow on/off
     var gDown = Input.GetKeyValue("g");
     if (gDown && !gWasDown) {
@@ -222,7 +230,8 @@ function CreateHud() {
     for (var n = 0; n < fleetTags.length; n++) {
         entries.push({ tag: fleetTags[n], name: fleetNames[fleetTags[n]] || fleetTags[n] });
     }
-    var height = HUD_PAD + (entries.length + 1) * (HUD_ROW + HUD_GAP) + HUD_PAD;
+    // header + one row per asset + the orbit-lines checkbox + Update TLEs
+    var height = HUD_PAD + (entries.length + 3) * (HUD_ROW + HUD_GAP) + HUD_PAD;
     canvas.SetSize(new Vector2(HUD_W, height));
     hud = { canvas: canvas, rows: [], height: height };
     var fx = HUD_PAD / HUD_W, fw = 1 - 2 * fx, fh = HUD_ROW / height;
@@ -241,6 +250,12 @@ function CreateHud() {
             fx, y, fw, fh, ROW_COLOR);
         hud.rows.push({ tag: entries[i].tag, text: text, button: button });
     }
+    var oy = (HUD_PAD + (entries.length + 1) * (HUD_ROW + HUD_GAP)) / height;
+    hud.orbitText = MakeText(canvas, OrbitLabel(), fx, oy, fw, fh, new Color(1, 0.85, 0.55, 1));
+    hud.orbitButton = MakeRowButton(canvas, "ToggleOrbits();", fx, oy, fw, fh, ROW_COLOR);
+    var uy = (HUD_PAD + (entries.length + 2) * (HUD_ROW + HUD_GAP)) / height;
+    hud.updateText = MakeText(canvas, updateStatus, fx, uy, fw, fh, new Color(0.6, 1, 0.75, 1));
+    hud.updateButton = MakeRowButton(canvas, "RequestUpdate();", fx, uy, fw, fh, ROW_COLOR);
     HudSelect(focusTag);
     PlaceHud();
     Report("hud: created with " + entries.length + " rows");
@@ -270,6 +285,10 @@ function ToggleAssets() {
         hud.rows[i].text.SetVisibility(hudOpen);
         hud.rows[i].button.SetVisibility(hudOpen);
     }
+    hud.orbitText.SetVisibility(hudOpen);
+    hud.orbitButton.SetVisibility(hudOpen);
+    hud.updateText.SetVisibility(hudOpen);
+    hud.updateButton.SetVisibility(hudOpen);
     hud.header.SetText(hudOpen ? "ASSETS  -" : "ASSETS  +");
     Report("hud: " + (hudOpen ? "opened" : "closed"));
 }
@@ -314,6 +333,159 @@ function PlaceHud() {
         p.y + f[1] * HUD_DISTANCE + r[1] * right + u[1] * up,
         p.z + f[2] * HUD_DISTANCE + r[2] * right + u[2] * up), false);
     hud.canvas.SetRotation(q, false);
+}
+
+// ---- Orbit lines ----
+// tools/run_fleet.py writes, per spacecraft, one-period orbit lines centred every half period
+// across the window (data/tracks/<catalog>_<run>_<n>.glb, unlit glTF line strips in world
+// units). Orbits precess (the ISS's by ~5 deg/day), so one line drifts off its spacecraft
+// within hours; showing the segment centred nearest the current time keeps each spacecraft in
+// the middle of its drawn orbit. The Assets panel checkbox (or the O key) shows / hides them.
+// Each segment is created with a known id so it can be found again with Entity.Get.
+const DATA_BASE_URL = "http://localhost:8000/";
+var orbitSegments = {};       // tag -> [ { id, t } ]
+var orbitActive = {};         // tag -> index of the segment shown
+var orbitsOn = false;
+var orbitIdCounter = 0;
+var orbitLinesLoaded = 0;
+
+function OrbitLabel() {
+    return (orbitsOn ? "[x]" : "[ ]") + " Orbit lines";
+}
+
+function NextOrbitId() {
+    orbitIdCounter++;
+    var hex = orbitIdCounter.toString(16);
+    while (hex.length < 12) {
+        hex = "0" + hex;
+    }
+    return "b0e5a000-0000-4000-8000-" + hex;
+}
+
+function CreateOrbitLines(tracks) {
+    // remove the previous set (after an update)
+    for (var oldTag in orbitSegments) {
+        for (var i = 0; i < orbitSegments[oldTag].length; i++) {
+            var old = Entity.Get(orbitSegments[oldTag][i].id);
+            if (old !== null) {
+                old.Delete();
+            }
+        }
+    }
+    orbitSegments = {};
+    orbitActive = {};
+    orbitLinesLoaded = 0;
+    for (var tag in tracks) {
+        orbitSegments[tag] = [];
+        var segs = tracks[tag].segments;
+        for (var k = 0; k < segs.length; k++) {
+            var id = NextOrbitId();
+            var url = DATA_BASE_URL + segs[k].file;
+            orbitSegments[tag].push({ id: id, t: segs[k].t });
+            MeshEntity.Create(null, url, [url], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+                id, "OnOrbitLineLoaded");
+        }
+    }
+}
+
+function OnOrbitLineLoaded(line) {
+    orbitLinesLoaded++;
+    ShowOrbitLines();          // set every loaded segment's visibility, including this one
+}
+
+// Index of the segment centred nearest time t.
+function NearestSegment(segs, t) {
+    var best = 0;
+    for (var k = 1; k < segs.length; k++) {
+        if (Math.abs(segs[k].t - t) < Math.abs(segs[best].t - t)) {
+            best = k;
+        }
+    }
+    return best;
+}
+
+function ShowOrbitLines() {
+    for (var tag in orbitSegments) {
+        var segs = orbitSegments[tag];
+        var active = NearestSegment(segs, elapsedSeconds);
+        orbitActive[tag] = active;
+        for (var k = 0; k < segs.length; k++) {
+            var line = Entity.Get(segs[k].id);
+            if (line !== null) {
+                line.SetVisibility(orbitsOn && k === active);
+            }
+        }
+    }
+}
+
+// Called every playback tick: switch segments only when "now" moves past a half period.
+function UpdateOrbitLines() {
+    for (var tag in orbitSegments) {
+        if (NearestSegment(orbitSegments[tag], elapsedSeconds) !== orbitActive[tag]) {
+            ShowOrbitLines();
+            return;
+        }
+    }
+}
+
+function ToggleOrbits() {
+    orbitsOn = !orbitsOn;
+    ShowOrbitLines();
+    if (hud !== null) {
+        hud.orbitText.SetText(OrbitLabel());
+    }
+    Report("orbit lines " + (orbitsOn ? "on" : "off") + " (" + orbitLinesLoaded + " loaded)");
+}
+
+// ---- Update TLEs ----
+// Asks tools/serve.py to refresh the TLEs from CelesTrak and rerun the fleet job (GMAT
+// headless), then reloads data/fleet.json in place. Takes a few seconds to a minute.
+var updating = false;
+var updateStatus = "Update TLEs";
+
+function SetUpdateStatus(text) {
+    updateStatus = text;
+    if (hud !== null) {
+        hud.updateText.SetText(text);
+    }
+}
+
+function RequestUpdate() {
+    if (updating) {
+        return;
+    }
+    updating = true;
+    SetUpdateStatus("Updating...");
+    Report("update: requested");
+    HTTPNetworking.Fetch(DATA_BASE_URL + "api/update", "OnUpdateDone");
+}
+
+function OnUpdateDone(body) {
+    var result = null;
+    try {
+        result = JSON.parse(body);
+    } catch (e) {
+    }
+    if (result === null || !result.ok) {
+        updating = false;
+        SetUpdateStatus("Update failed");
+        Report("update: failed " + (result ? result.output.slice(-300) : "(no response)"));
+        return;
+    }
+    Report("update: done, reloading fleet");
+    HTTPNetworking.Fetch(EPHEMERIS_URL, "OnFleetReloaded");
+}
+
+function OnFleetReloaded(body) {
+    updating = false;
+    if (!body) {
+        SetUpdateStatus("Update failed");
+        Report("update: fleet reload failed");
+        return;
+    }
+    var parsed = JSON.parse(body);
+    ApplyFleet(parsed);
+    SetUpdateStatus("Updated " + parsed.generated.slice(12, 17) + " UTC");
 }
 
 // ---- Spacecraft labels ----
@@ -399,10 +571,20 @@ function OnEphemerisLoaded(body) {
         Report("fleet: failed to load " + EPHEMERIS_URL);
         return;
     }
-    var parsed = JSON.parse(body);
+    ApplyFleet(JSON.parse(body));
+    CreateLabels();
+    CreateHud();
+    Time.SetInterval(`UpdateOrbit();`, ORBIT_TICK_SECONDS);
+}
+
+// Use a fleet.json: positions, Earth rotation, Sun, orbit lines. Called on start-up and again
+// after "Update TLEs" (same spacecraft, new data, playback restarted at the new run time).
+function ApplyFleet(parsed) {
     fleet = parsed.objects;
     fleetNames = parsed.names;
     fleetTags = [];
+    windowEnd = 0;
+    windowEndReported = false;
     for (var tag in fleet) {
         fleetTags.push(tag);
         var track = fleet[tag];
@@ -415,11 +597,11 @@ function OnEphemerisLoaded(body) {
     earthRotation0 = parsed.earth.rotation_deg;
     earthRate = parsed.earth.rate_deg_per_s;
     PointSun(parsed.sun_dir);
+    if (parsed.tracks) {
+        CreateOrbitLines(parsed.tracks);
+    }
     Report("fleet: " + fleetTags.join(",") + " window from " + parsed.epoch + " UTC, starting at t "
         + elapsedSeconds + " s (" + parsed.generated + " UTC)");
-    CreateLabels();
-    CreateHud();
-    Time.SetInterval(`UpdateOrbit();`, ORBIT_TICK_SECONDS);
 }
 
 // The VEML light is created as a Unity point light (the runtime's default), which doesn't
@@ -514,6 +696,7 @@ function UpdateOrbit() {
         }
     }
     RotateEarth(elapsedSeconds);
+    UpdateOrbitLines();
     for (var n = 0; n < fleetTags.length; n++) {
         var entity = Entity.GetByTag(fleetTags[n]);
         if (entity === null) {
