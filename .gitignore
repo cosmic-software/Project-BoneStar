@@ -23,3 +23,9 @@ data/oem/
 data/*.script
 data/*.csv
 data/tracks/
+
+# GMAT element reports (tools/run_fleet.py)
+data/elements/
+
+# LibreOffice lock files
+.~lock.*#

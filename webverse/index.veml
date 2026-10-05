@@ -49,7 +49,8 @@
       <mesh-name>../models/atmosphere.glb</mesh-name>
       <mesh-resource>../models/atmosphere.glb</mesh-resource>
     </entity>
-    <!-- Spacecraft: one entity per object in data/fleet.json, tagged with its catalog
+    <!-- Spacecraft: the viewer creates a probe.glb entity for any spacecraft in data/fleet.json
+         without one here; these two predate that. One entity per object, tagged with its catalog
          number (tools/run_fleet.py reads tle/<number>.tle). All use probe.glb, which is
          10.5 x 32.8 x 3.4 units at scale 1 (pivot at its centre); 0.05 makes it ~164 km
          long: hugely exaggerated, but visible. Add a tle/ file and an entity here to add one. -->

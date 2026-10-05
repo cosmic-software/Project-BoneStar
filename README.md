@@ -31,13 +31,22 @@ webverse/Scripts/orbit.js        fetches it over HTTP and flies each spacecraft 
 
 ```
 tle/      input TLEs, one file per spacecraft: name line + the two element lines
+spacecraft.xlsx      other spacecraft: Earth / Moon orbiters from elements or OEM files
+places.xlsx          places to show on the Earth (cities, sites; see Adding places)
+groundstations.xlsx  ground stations: places plus frequency, beam FOV and 1-way / 2-way link
 tools/    run_fleet.py (the fleet job), update_tles.py (refresh TLEs from CelesTrak),
-          serve.py (local server for the viewer, with the update action),
+          places.py (reads both spreadsheets), serve.py (local server for the viewer, with
+          the update action),
           gmat_to_webverse.py (single-orbit demo converter)
 gmat/     GMAT scenario scripts (the single-orbit demo)
 data/     generated output: OEMs, JSON, the generated GMAT script (not committed)
 models/   probe.glb (spacecraft), earth.glb (NASA Blue Marble globe, unit radius),
-          atmosphere.glb (glow shells + night-side caps, unit = Earth radius)
+          moon.glb (NASA LRO LROC colour map, unit radius),
+          atmosphere.glb (glow shells + night-side caps, unit = Earth radius),
+          grid.glb (10 deg latitude / longitude lines, unit = Earth radius),
+          select.glb (the white selection square),
+          place.glb / station.glb (markers, unit spheres), link_2way.glb / link_1way.glb
+          (station-to-spacecraft lines, unit length)
 webverse/ the WebVerse world: index.veml (scene) + Scripts/orbit.js (playback, camera)
 ```
 
@@ -125,12 +134,19 @@ What you see:
 |---|---|
 | Left-drag | orbit the camera around the current focus |
 | W / S, = / - , right-drag | zoom |
-| Assets panel row | centre the view on that object |
+| Assets panel tabs | **Spacecraft**, **Places**, **Ground stations**: each lists its objects, 6 at a time (`<` / `>` to page through more) |
+| Assets panel name | Earth or a spacecraft: centre the view on it (riding along with a spacecraft); a place or station: centre it as below |
 | Left arrow | next spacecraft: the camera rides with it, 1 unit out |
 | Right arrow, R | Earth view (starts 4 Earth radii out) |
 | G | atmosphere (glow and night side) on / off |
-| Orbit lines row, O | show / hide each spacecraft's orbit (one period, centred on it) |
+| V (hold) | pie menu, acting on the selection. **Show info**: a panel on the left (10 pt): a spacecraft's osculating elements from GMAT (SMA, ECC, INC, RAAN, AOP, TA, argument of latitude, period, apogee / perigee) and attitude, or a place's / station's location, settings and current contacts. **Show data**: the same panel, the next passes (AOS, LOS, duration, max elevation): a station's, a spacecraft's over every station, or all. **Align camera**: a spacecraft, look along its velocity with the Earth below. **Align vehicle**: a spacecraft's attitude panel (below) |
+| Grid (10°) row [x], L | latitude / longitude lines every 10 deg, turning with the Earth (equator and Greenwich meridian in gold) |
+| Spacecraft [x] box; All orbit lines [x], O | show / hide each spacecraft's orbit (one period, centred on it), or all of them |
 | Update TLEs row | fetch fresh TLEs, rerun GMAT, reload the viewer (about 3-20 s) |
+| Click a place or ground station (its dot, label or panel row) | select it: a white square marks it and the view locks onto it, fixed to the ground as the Earth turns; drag orbits around it, zoom moves in (to 50 km) and out. Earth, R or the arrow keys leave |
+| Ground view row (when a site is selected) | camera 1 km above the site's ground, facing the spacecraft highest in its sky; drag to look around and watch passes overhead. Back to orbit view returns. Nothing within 30 km of the camera is drawn (the camera's near clipping distance) |
+| Show places [x] (Places tab), P | places from `places.xlsx` on / off |
+| Show ground stations [x] (Ground stations tab) | ground stations and their link lines on / off |
 
 **Orbit lines**: the fleet job writes, per spacecraft, one-orbit lines centred every half
 period across the window, and the viewer shows the one centred nearest the current time.
@@ -153,12 +169,134 @@ so the caps face away from GMAT's Sun.
 
 ### Adding a spacecraft
 
-1. Put its TLE in `tle/<catalog number>.tle`.
-2. Add a mesh entity to `webverse/index.veml` with `tag="<catalog number>"` (copy the ISS one
-   and give it a new `id` UUID).
-3. Rerun `python tools\run_fleet.py`.
+An Earth orbiter with a TLE: put its TLE in `tle/<catalog number>.tle` and rerun
+`python tools\run_fleet.py`.
 
-Its label and its row in the Assets panel are added automatically.
+Anything else (a Moon orbiter, or an Earth orbiter without a TLE) goes in `spacecraft.xlsx`
+(or `spacecraft.ods`), sheet **Spacecraft**, one row each:
+
+| Name | Body | Source | Epoch (UTC) | SMA (km) | ECC | INC | RAAN | AOP | TA | OEM file |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Example lunar orbiter | Moon | Elements | 01 Oct 2026 00:00:00 | 1837.4 | 0.001 | 90 | 0 | 0 | 0 | |
+
+- **Body**: the body it orbits, Earth or Moon (blank = Earth).
+- **Source = Elements**: osculating Keplerian elements at the Epoch, which must be at or before
+  the window start (an hour before the run). Earth: EarthMJ2000Eq axes. Moon: MoonInertial
+  axes (Moon-centred, the lunar equator at J2000, GMAT's `BodyInertial`), so INC 90 is a polar
+  lunar orbit. (The Moon's pole has moved ~3 deg since J2000, so such an orbit passes ~100 km
+  from the pole today.) GMAT propagates them with the body's gravity field (Earth JGM-3 8x8,
+  Moon LP165P 10x10) and the other body and the Sun as point masses.
+- **Source = OEM**: a CCSDS OEM trajectory file, played back as given, its path in the last
+  column (absolute or relative to the project folder). CENTER_NAME EARTH or MOON; REF_FRAME
+  EME2000, ICRF or GCRF; TIME_SYSTEM UTC, TAI, TT, TDB or GPS. Moon-centred states get the
+  Moon's position added. It should cover the window; outside what it covers the spacecraft
+  holds its position. Its orbital elements are computed from the trajectory.
+
+`python tools\spacecraft.py` checks the sheet on its own. Every spacecraft's model (probe.glb),
+label and Assets panel row are created automatically; a Moon orbiter's orbit lines are drawn
+about the Moon and move with it.
+
+Checked: a Moon-centred TDB copy of the example orbiter's trajectory, loaded as an OEM, lands
+on the original to 0.0 m at every time, and the elements computed from it match GMAT's.
+
+### The Moon
+
+GMAT reports the Moon's position and velocity every 60 s, and its orientation (Moon-fixed
+frame, with libration), solved from the Earth's and the Sun's directions seen from the Moon in
+both frames. Checked: it turns 13.1757 deg/day (sidereal 13.1764) and its 0 deg longitude stays
+within 4.2 deg of the Earth (libration). `moon.glb` carries NASA's LRO LROC colour map (SVS CGI
+Moon Kit) on a unit sphere laid out like `earth.glb`; the viewer scales it to the mean radius
+(1737.4 km), places and turns it, and the sun lights it, so it shows its phase. The Assets
+panel's **Moon** row centres the view on it. The camera draws out to 10,000 units (1 million
+km), so the Moon (~3,800 units away) is always in range.
+
+### Adding places
+
+Each spreadsheet row has a **Body** column (places: F, ground stations: I): Earth or Moon,
+blank = Earth. Moon sites sit on the lunar surface (a sphere of the mean radius, 1737.4 km) and
+turn with the Moon; their ground elevation is metres above that radius and is never looked up
+(blank = 0). A station's link lines and passes also need the line of sight to miss the Earth
+and the Moon, so an Earth station tracking a Moon orbiter loses it behind the Moon.
+
+Open `places.xlsx` in Excel (or LibreOffice) and add one row per place on the **Places**
+sheet:
+
+| Name | Latitude | Longitude | Altitude AGL (m) | Ground elevation (m) |
+|---|---|---|---|---|
+| Kennedy LC-39A | 28.608389 | -80.604333 | 0 | |
+
+- **Latitude / Longitude**: decimal degrees, north and east positive. `28.6083 N`,
+  `80.6043 W` and degrees-minutes-seconds (`28 36 30.2 N`, `28°36'30.2"N`) also work.
+- **Altitude AGL**: metres above the ground there, e.g. an antenna's height. Blank = 0.
+- **Ground elevation**: optional, metres above sea level. Leave it blank and it is looked up
+  from the Copernicus GLO-90 terrain model (Open-Meteo elevation API, free, no key; needs
+  internet the first time, then cached in `data/elevation_cache.json`).
+
+LibreOffice users can keep the file as `places.ods` (its own format) instead: if both
+`places.xlsx` and `places.ods` exist, the one saved last is used (the same goes for
+`groundstations.ods`), and the job prints which file it read.
+
+Save, then rerun `python tools\run_fleet.py` or press **Update TLEs** in the viewer. Reloading
+the world alone is not enough: the spreadsheets are read by the fleet job, not the viewer. Each
+place shows as a yellow dot with a yellow label, fixed to the turning Earth. The **Places** tab
+of the Assets panel lists them (click one to centre it); its **Show places** [x] box (or
+**P**) hides or shows them all. `python tools\places.py`
+checks both spreadsheets on their own and names any bad row. Nothing needs installing: the
+.xlsx files are read with Python's standard library.
+
+The height used is ground elevation + AGL, taken as height above the WGS84 ellipsoid. Sea
+level differs from the ellipsoid by up to about 100 m (the geoid), which is ignored: 0.001
+units at the viewer's scale.
+
+### Adding ground stations
+
+`groundstations.xlsx`, sheet **Ground stations**: the same five columns as places, then three
+more:
+
+| Name | Latitude | Longitude | Altitude AGL (m) | Ground elevation (m) | Frequency (MHz) | Beam FOV (deg) | Link |
+|---|---|---|---|---|---|---|---|
+| Example station | 28.608389 | -80.604333 | 10 | | 2250 | 170 | 2-way |
+
+- **Frequency**: operating frequency in MHz (2250 S-band, 8400 X-band, ...).
+- **Beam FOV**: the full cone angle the station sees, centred straight up. 180 = horizon to
+  horizon; 170 = everything more than 5 deg above the horizon.
+- **Link**: `1-way` (the station only receives: downlink) or `2-way` (uplink and downlink).
+  The cell has a drop-down.
+
+In the viewer each station is a cyan dot with a two-line label (name; frequency and link).
+Place labels sit centred just above their dot and station labels centred just below theirs
+(up and down as seen on screen), so a place and a station at the same spot don't overlap.
+While a spacecraft is inside a station's beam, a cyan line joins them: **solid for 2-way,
+dashed for 1-way**. The line appears and disappears as the spacecraft enters and leaves the
+beam. The **Ground stations** tab lists them; its **Show ground stations** [x] box hides or
+shows the stations and their lines.
+
+### Attitude modes (Align vehicle)
+
+Each spacecraft model turns toward its mode's attitude at no more than 10 deg/s. The
+boresight is the telescope's aperture end of `probe.glb` (its +X); the solar arrays run along
+its Y.
+
+| Mode | Boresight | Arrays |
+|---|---|---|
+| Sun | at the Sun | along the orbit normal |
+| LVLH | along the velocity (ram); fixed in the local-vertical / local-horizontal frame | along the orbit normal |
+| Nadir | at the Earth's centre | along the orbit normal |
+| Zenith | straight away from the Earth | along the orbit normal |
+| Normal | along the orbit normal (r x v) | along the velocity |
+| Target | at a place, ground station or spacecraft, held as both move | along the orbit normal |
+| Hold | keeps its current attitude (every spacecraft starts here) | |
+
+For Target, choose Target, then select the target (click a place or station, or a spacecraft's
+row in the Assets panel): the view stays where it is.
+
+### Passes
+
+`run_fleet.py` finds every pass of every spacecraft through every ground station's beam over
+the window (AOS / LOS to 0.05 s, peak elevation), with the same beam test and Earth rotation
+the viewer uses for link lines. Checked against GMAT's own ContactLocator (5 deg mask, i.e. a
+170 deg beam) for the example station: the same 4 passes, AOS and LOS within ~1 s, durations
+within 0.3 s (the viewer turns the Earth about the J2000 pole, ~0.15 deg from the true pole).
 
 ## JSON shape
 
@@ -172,6 +310,17 @@ Its label and its row in the Assets panel are added automatically.
   "names": { "25544": "ISS (ZARYA)", "20580": "HST" },
   "tracks": { "25544": { "colour": [1, 0.62, 0.2], "period": 5577.0,
                          "segments": [ {"file": "data/tracks/25544_<run>_00.glb", "t": 2788.5}, ... ] } },
+  "moon": { "radius_km": 1737.4, "samples": [[t, x, y, z, vx, vy, vz, qx, qy, qz, qw], ...] },
+  "craft": { "25544": {"body": "Earth", "source": "tle"},
+             "sc-example-lunar-orbiter": {"body": "Moon", "source": "elements"} },
+  "places": [ {"name": "Kennedy LC-39A", "body": "Earth", "lat": 28.608389, "lon": -80.604333, "agl_m": 0.0,
+               "ground_m": 6.0, "ecef_km": [914.820725, -5528.578756, 3035.871127]} ],
+  "ground_stations": [ {"name": "Example station", ... same fields ..., "freq_mhz": 2250.0,
+                        "fov_deg": 170.0, "link": "2-way"} ],
+  "elements": { "25544": { "fields": ["t", "sma", "ecc", "inc", "raan", "aop", "ta", "period", "rapo", "rper"],
+                           "rows": [[t, ...], ...] } },
+  "passes": [ {"station": "Example station", "catalog": "20580", "name": "HST", "aos": 30243.1,
+               "los": 30717.8, "max_t": 30480.6, "max_el": 19.91} ],
   "objects": {
     "25544": [
       {"t": 0, "pos": [x, y, z], "vel": [vx, vy, vz]},
@@ -185,7 +334,9 @@ Its label and its row in the Assets panel are added automatically.
 `generated_t` is where the run time falls in the window, and is where playback starts.
 `earth.rotation_deg` is the Greenwich meridian's angle from +X at `epoch`; `sun_dir` is a
 unit vector toward the Sun at run time. `tracks` lists each spacecraft's orbit-line files and
-the time (`t`, seconds after `epoch`) each one is centred on.
+the time (`t`, seconds after `epoch`) each one is centred on. `elements` are GMAT's osculating elements every 60 s (SMA, ECC, TA, period and apsis radii about the Earth; INC, RAAN, AOP in EarthMJ2000Eq; km, deg, s). `places` and `ground_stations`
+come from the two spreadsheets; `ecef_km` is the Earth-fixed WGS84 position, which the viewer
+turns by the Earth's rotation angle.
 
 ## Also included: single-orbit demo
 
@@ -228,7 +379,8 @@ panels (HTML) were tried first and never became visible in this runtime.
 ## Credits
 
 Earth imagery: NASA Blue Marble, served by NASA GIBS (layer
-`BlueMarble_ShadedRelief_Bathymetry`).
+`BlueMarble_ShadedRelief_Bathymetry`). Moon imagery: NASA LRO LROC WAC colour map, from the
+NASA Scientific Visualization Studio CGI Moon Kit.
 
 ## License
 
