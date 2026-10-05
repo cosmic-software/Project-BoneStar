@@ -42,6 +42,7 @@ gmat/     GMAT scenario scripts (the single-orbit demo)
 data/     generated output: OEMs, JSON, the generated GMAT script (not committed)
 models/   probe.glb (spacecraft), earth.glb (NASA Blue Marble globe, unit radius),
           moon.glb (NASA LRO LROC colour map, unit radius),
+          source/ (models as authored, cameras included; see Instrument view),
           atmosphere.glb (glow shells + night-side caps, unit = Earth radius),
           grid.glb (10 deg latitude / longitude lines, unit = Earth radius),
           select.glb (the white selection square),
@@ -139,8 +140,8 @@ What you see:
 | Left arrow | next spacecraft: the camera rides with it, 1 unit out |
 | Right arrow, R | Earth view (starts 4 Earth radii out) |
 | G | atmosphere (glow and night side) on / off |
-| V (hold) | pie menu, acting on the selection. **Show info**: a panel on the left (10 pt): a spacecraft's osculating elements from GMAT (SMA, ECC, INC, RAAN, AOP, TA, argument of latitude, period, apogee / perigee) and attitude, or a place's / station's location, settings and current contacts. **Show data**: the same panel, the next passes (AOS, LOS, duration, max elevation): a station's, a spacecraft's over every station, or all. **Align camera**: a spacecraft, look along its velocity with the Earth below. **Align vehicle**: a spacecraft's attitude panel (below) |
-| Grid (10°) row [x], L | latitude / longitude lines every 10 deg, turning with the Earth (equator and Greenwich meridian in gold) |
+| V (hold) | pie menu, acting on the selection. **Show info**: a panel on the left: a spacecraft's osculating elements (SMA, ECC, INC, RAAN, AOP, TA, argument of latitude, period, apoapsis / periapsis), attitude and next passes, or a place's / station's location, settings, current contacts and next passes. **Show data**: the instrument view (below). **Align camera**: a spacecraft, look along its velocity with its body below. **Align vehicle**: a spacecraft's attitude panel (below) |
+| [#] box on the Earth / Moon row, L | 10 deg latitude / longitude grid on that body, turning with it (equator and prime meridian in gold); L: the body in view |
 | Spacecraft [x] box; All orbit lines [x], O | show / hide each spacecraft's orbit (one period, centred on it), or all of them |
 | Update TLEs row | fetch fresh TLEs, rerun GMAT, reload the viewer (about 3-20 s) |
 | Click a place or ground station (its dot, label or panel row) | select it: a white square marks it and the view locks onto it, fixed to the ground as the Earth turns; drag orbits around it, zoom moves in (to 50 km) and out. Earth, R or the arrow keys leave |
@@ -181,11 +182,15 @@ Anything else (a Moon orbiter, or an Earth orbiter without a TLE) goes in `space
 
 - **Body**: the body it orbits, Earth or Moon (blank = Earth).
 - **Source = Elements**: osculating Keplerian elements at the Epoch, which must be at or before
-  the window start (an hour before the run). Earth: EarthMJ2000Eq axes. Moon: MoonInertial
-  axes (Moon-centred, the lunar equator at J2000, GMAT's `BodyInertial`), so INC 90 is a polar
-  lunar orbit. (The Moon's pole has moved ~3 deg since J2000, so such an orbit passes ~100 km
-  from the pole today.) GMAT propagates them with the body's gravity field (Earth JGM-3 8x8,
-  Moon LP165P 10x10) and the other body and the Sun as point masses.
+  the window start (an hour before the run). Earth: EarthMJ2000Eq axes. Moon: the Moon's
+  equator of date at the Epoch: Z is the lunar pole at that moment (from GMAT's Moon-fixed
+  frame) and X the ascending node of the lunar equator on the Earth's J2000 equator (GMAT's
+  `BodyInertial` construction, but with the current pole: it has moved ~3 deg since J2000). So
+  INC 90 is a polar lunar orbit today. A short GMAT run gets the Moon's orientation at each
+  Epoch and the elements become a Moon-centred MJ2000Eq state for the main run. Lunar
+  orbiters' elements in the info panel use the same frame (at each moment). GMAT propagates
+  with the body's gravity field (Earth JGM-3 8x8, Moon LP165P 10x10) and the other body and
+  the Sun as point masses.
 - **Source = OEM**: a CCSDS OEM trajectory file, played back as given, its path in the last
   column (absolute or relative to the project folder). CENTER_NAME EARTH or MOON; REF_FRAME
   EME2000, ICRF or GCRF; TIME_SYSTEM UTC, TAI, TT, TDB or GPS. Moon-centred states get the
@@ -198,6 +203,10 @@ about the Moon and move with it.
 
 Checked: a Moon-centred TDB copy of the example orbiter's trajectory, loaded as an OEM, lands
 on the original to 0.0 m at every time, and the elements computed from it match GMAT's.
+Lunar elements: elements -> state -> elements round-trips to 4e-11; GMAT gets SMA and ECC back
+exactly, and for the example (INC 90, AOP 0, TA 0) the spacecraft starts at Moon-fixed Z =
+0.000 km, i.e. on the current lunar equator. Its passes over the example station 0.5 deg from
+the south pole now peak at ~83 deg (with the J2000 equator they peaked at ~47 deg).
 
 ### The Moon
 
@@ -271,6 +280,56 @@ dashed for 1-way**. The line appears and disappears as the spacecraft enters and
 beam. The **Ground stations** tab lists them; its **Show ground stations** [x] box hides or
 shows the stations and their lines.
 
+### Instrument view (Show data)
+
+Spacecraft models can carry instrument cameras. Author the model with a Camera object in it
+(in Blender: add a camera, parent it to the model, point it along the instrument's boresight,
+set its field of view, and export glTF with cameras included) and save it as
+`models/source/<name>.glb`. The fleet job (`tools/instruments.py`) finds every node of object
+type camera, passes its position, pointing and vertical field of view to the viewer, and writes
+`models/<name>.glb` -- the copy the viewer loads -- with the cameras taken out: WebVerse loads
+models with glTFast's default settings, which would turn each glTF camera into a live Unity
+camera drawing over the viewer's. `models/source/probe.glb` has one: "Instrument", at the
+telescope aperture, looking along the boresight, 10 deg field of view.
+
+**Show data** (spacecraft selected) moves the viewer's camera to the instrument camera, which
+follows the spacecraft's attitude (so Nadir or Target modes point it). WebVerse scripts cannot
+change the camera's field of view (only X3D worlds can), so a white frame marks the instrument's
+own field of view in the ~59 deg view, with a caption; what the instrument sees is inside the
+frame. Show data again, Earth / Moon, R, the arrow keys or another spacecraft leave it. A true
+picture-in-picture is not possible: the runtime has one camera and no viewport or
+render-to-image API for scripts.
+
+### Panels
+
+Every panel and the pie menu are drawn at `UI_SCALE` (0.7) of their original size (one constant
+in `orbit.js`). The Assets, info and attitude panels each have a `::` grip: click it (it turns
+gold), then drag with the left button and the panel follows; release to drop it. Positions are
+not kept across reloads (WebVerse scripts have no storage). Orbit lines, the grids and link
+lines are drawn with blended materials at full opacity, because the runtime's sun always casts
+shadows from opaque meshes and those lines laid dark bands across the Earth and the Moon.
+
+### Link budgets and charts
+
+Each ground station can have a radio (`groundstations` columns J-L: antenna gain in dBi, system
+noise temperature in K, uplink transmit power in W) and each spacecraft one too
+(`spacecraft.xlsx`, sheet **Payloads**, by name or catalog number, TLE spacecraft included:
+transmit power, antenna gain, downlink rate, required Eb/N0, receive G/T, uplink rate, other
+losses). `tools/linkbudget.py` holds the equations (free space, clear sky: EIRP, path loss, G/T,
+C/N0, Eb/N0, margin); checked by hand (S-band at 1000 km: 159.49 dB path loss) and against
+the viewer's copy (identical to 1e-13 dB over 10,000 random cases).
+
+**Show info** on a station lists, for every spacecraft in its beam, the range, path loss and
+the downlink (and, for 2-way, uplink) Eb/N0 and margin, live, flagged "NOT CLOSING" below
+0 dB; on a spacecraft, the same for every station that has it.
+
+The fleet job also draws a chart per station with matplotlib (`tools/charts.py`): its contacts
+over the window, elevation through each pass and downlink margin through each pass (each
+against the share of the pass, AOS to LOS), with the beam edge and the 0 dB line. The viewer
+shows the selected station's chart in a panel at the bottom right while Show info is open
+(`::` grip to move it). Checked: the charts' geometry reproduces every pass's peak elevation to
+0.005 deg, and every pass starts and ends at the beam edge or where the Earth / Moon blocks it.
+
 ### Attitude modes (Align vehicle)
 
 Each spacecraft model turns toward its mode's attitude at no more than 10 deg/s. The
@@ -311,8 +370,10 @@ within 0.3 s (the viewer turns the Earth about the J2000 pole, ~0.15 deg from th
   "tracks": { "25544": { "colour": [1, 0.62, 0.2], "period": 5577.0,
                          "segments": [ {"file": "data/tracks/25544_<run>_00.glb", "t": 2788.5}, ... ] } },
   "moon": { "radius_km": 1737.4, "samples": [[t, x, y, z, vx, vy, vz, qx, qy, qz, qw], ...] },
-  "craft": { "25544": {"body": "Earth", "source": "tle"},
-             "sc-example-lunar-orbiter": {"body": "Moon", "source": "elements"} },
+  "craft": { "25544": {"body": "Earth", "source": "tle", "model": "probe.glb"},
+             "sc-example-lunar-orbiter": {"body": "Moon", "source": "elements", "model": "probe.glb"} },
+  "instruments": { "probe.glb": [ {"name": "Instrument", "pos": [-4, 0, 0], "fwd": [-1, 0, 0],
+                                   "up": [0, 1, 0], "yfov_deg": 10.0, "aspect": 1.0} ] },
   "places": [ {"name": "Kennedy LC-39A", "body": "Earth", "lat": 28.608389, "lon": -80.604333, "agl_m": 0.0,
                "ground_m": 6.0, "ecef_km": [914.820725, -5528.578756, 3035.871127]} ],
   "ground_stations": [ {"name": "Example station", ... same fields ..., "freq_mhz": 2250.0,

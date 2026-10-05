@@ -93,6 +93,9 @@ function PlaceCamera() {
 }
 
 function SetFocus(tag) {
+    if (instrumentView !== null) {
+        ExitInstrumentView();
+    }
     Camera.AttachToEntity(null);
     if (tag === "Earth") {
         focusEntity = null;
@@ -120,6 +123,9 @@ function SetFocus(tag) {
 }
 
 function Zoom(factor) {
+    if (instrumentView !== null) {
+        return;
+    }
     if (siteView !== null) {
         SiteZoom(factor);
         return;
@@ -139,7 +145,11 @@ function UpdateCamera() {
     var changed = false;
     var look = Input.GetLookValue();
     var moved = look.x !== 0 || look.y !== 0;
-    if (Input.GetLeft() && moved && !pieOpen) {
+    if (Input.GetLeft() && moved && panelMove !== null) {
+        panelOffset[panelMove].x += look.x * PX_TO_VIEW;   // mouse right / up = panel right / up
+        panelOffset[panelMove].y += look.y * PX_TO_VIEW;
+        panelMoved = true;
+    } else if (Input.GetLeft() && moved && !pieOpen && instrumentView === null) {
         if (siteView !== null) {
             SiteDrag(look.x, look.y);
         } else {
@@ -185,7 +195,7 @@ function UpdateCamera() {
     // L: grid on/off
     var lDown = Input.GetKeyValue("l");
     if (lDown && !lWasDown) {
-        ToggleGrid();
+        ToggleGrid(BodyInView());
     }
     lWasDown = lDown;
     // G: atmosphere glow on/off
@@ -225,12 +235,14 @@ function Tick() {
     UpdateClick();
     FollowSite();
     FollowCraft();
+    UpdateInstrumentView();
     UpdateSites();
     UpdateLabels();
     UpdateSelectBox();
     UpdateHud();
     UpdateInfo();
     UpdateAttitudePanel();
+    UpdateChartPanel();
     UpdatePie();
 }
 
@@ -250,7 +262,10 @@ const HUD_DISTANCE = 0.6;     // in front of the camera: past its 0.3 near plane
 // px in from the right. It scales with the window, since it is fixed in angle, not pixels.
 const HUD_RIGHT_EDGE = 0.505;
 const HUD_TOP_EDGE = 0.237;
-const HUD_WORLD_WIDTH = 0.165;
+// UI_SCALE shrinks every panel and the pie menu together (text included): 1 = the original
+// size (~240 px wide Assets panel on a 1903 px window), 0.7 = 70%.
+const UI_SCALE = 0.7;
+const HUD_WORLD_WIDTH = 0.165 * UI_SCALE;
 // Layout in canvas units: header, then one row per asset; the height fits the rows.
 const HUD_W = 500;
 const HUD_PAD = 12;
@@ -267,6 +282,15 @@ const TINT_NORMAL = new Color(1, 1, 1, 1);
 const TINT_HOVER = new Color(1.6, 1.6, 1.6, 1);
 const TINT_PRESS = new Color(0.8, 0.8, 0.8, 1);
 var hud = null;               // { canvas, background, header, rows: [ { tag, text, button } ] }
+// Moving panels: each panel has a "::" grip. Click it, then drag (left button) and the panel
+// follows the mouse; releasing drops it. The camera stays still meanwhile. Offsets are in view
+// units at HUD_DISTANCE from each panel's home corner (lost on reload).
+const PX_TO_VIEW = 1 / 1459;  // view units per mouse pixel at HUD_DISTANCE (calibrated, see above)
+const GRIP_COLOR = new Color(0.5, 0.7, 1, 1);
+const GRIP_ARMED = new Color(1, 0.85, 0.3, 1);
+var panelOffset = { hud: { x: 0, y: 0 }, info: { x: 0, y: 0 }, att: { x: 0, y: 0 }, chart: { x: 0, y: 0 } };
+var panelMove = null;         // the panel being moved ("hud", "info", "att"), or null
+var panelMoved = false;       // dragged since its grip was clicked
 var hudOpen = true;
 
 function MakeRowButton(canvas, onClick, x, y, w, h, color) {
@@ -292,6 +316,7 @@ function MakeText(canvas, words, x, y, w, h, color, font) {
 // orbit lines / show places / show ground stations; a spacecraft row's box is its orbit line.
 // Switching tabs or paging rebuilds the panel (on the next frame, not inside the click).
 const HUD_PAGE_ROWS = 6;
+const GRID_BOX_COLOR = new Color(1, 0.78, 0.3, 1);   // the grids' gold
 const HUD_ITEM_FONT = 38;
 const HUD_TAB_FONT = 30;
 const HUD_INDENT = 0.06;            // item rows, as a fraction of the panel width
@@ -304,9 +329,8 @@ var hudDirty = false;               // rebuild the panel on the next frame
 // The panel's rows below the ASSETS header, top to bottom.
 function HudLayout() {
     var white = new Color(1, 1, 1, 1);
-    var rows = [{ tag: "Earth", name: "Earth", onClick: "SelectAsset('Earth');", color: white },
-        { tag: "Moon", name: "Moon", onClick: "SelectAsset('Moon');", color: new Color(0.85, 0.85, 0.8, 1) },
-        { tag: "grid", name: "Grid (10\u00b0)", onClick: "ToggleGrid();", color: new Color(1, 0.78, 0.3, 1), box: "grid" },
+    var rows = [{ tag: "Earth", name: "Earth", onClick: "SelectAsset('Earth');", color: white, box: "grid:Earth" },
+        { tag: "Moon", name: "Moon", onClick: "SelectAsset('Moon');", color: new Color(0.85, 0.85, 0.8, 1), box: "grid:Moon" },
         { tabs: true }];
     var items = [];
     if (hudTab === "craft") {
@@ -367,8 +391,11 @@ function CreateHud() {
     // Created first, so it is drawn underneath everything else (and its clicks do nothing).
     hud.background = HudPart(MakeRowButton(canvas, "", 0, 0, 1, 1, PANEL_COLOR), true);
     var fy = HUD_PAD / height;
-    hud.header = HudPart(MakeText(canvas, "ASSETS  -", fx, fy, fw, fh, new Color(0.5, 0.7, 1, 1)), false);
-    hud.headerButton = HudPart(MakeRowButton(canvas, "ToggleAssets();", fx, fy, fw, fh, ROW_COLOR), false);
+    var gripW = 0.16 * fw;
+    hud.grip = HudPart(MakeText(canvas, "::", fx, fy, gripW, fh, panelMove === "hud" ? GRIP_ARMED : GRIP_COLOR), false);
+    HudPart(MakeRowButton(canvas, "StartMove('hud');", fx, fy, gripW, fh, ROW_COLOR), false);
+    hud.header = HudPart(MakeText(canvas, "ASSETS  -", fx + gripW, fy, fw - gripW, fh, new Color(0.5, 0.7, 1, 1)), false);
+    hud.headerButton = HudPart(MakeRowButton(canvas, "ToggleAssets();", fx + gripW, fy, fw - gripW, fh, ROW_COLOR), false);
     var boxW = 0.2 * fw, gap = 0.02;
     for (var i = 0; i < layout.length; i++) {
         var row = layout[i];
@@ -402,7 +429,8 @@ function CreateHud() {
             button: HudPart(MakeRowButton(canvas, row.onClick, x, y, nameW, fh, ROW_COLOR), true) };
         if (row.box) {
             rec.boxText = HudPart(MakeText(canvas, BoxText(row.box), x + nameW + gap, y, boxW, fh,
-                row.box.indexOf("orbit") === 0 ? new Color(1, 0.85, 0.55, 1) : row.color), true);
+                row.box.indexOf("orbit") === 0 ? new Color(1, 0.85, 0.55, 1)
+                    : (row.box.indexOf("grid") === 0 ? GRID_BOX_COLOR : row.color)), true);
             rec.boxButton = HudPart(MakeRowButton(canvas, BoxClick(row.box), x + nameW + gap, y, boxW, fh,
                 ROW_COLOR), true);
         }
@@ -456,8 +484,8 @@ function PageTab(step) {
 
 // What a row's [x] box shows, and what clicking it does.
 function BoxText(box) {
-    if (box === "grid") {
-        return gridOn ? "[x]" : "[ ]";
+    if (box.indexOf("grid:") === 0) {
+        return gridOn[box.slice(5)] ? "[#]" : "[ ]";       // # = a grid
     }
     if (box === "orbits") {
         var allOn = fleetTags.length > 0;
@@ -473,8 +501,8 @@ function BoxText(box) {
 }
 
 function BoxClick(box) {
-    if (box === "grid") {
-        return "ToggleGrid();";
+    if (box.indexOf("grid:") === 0) {
+        return "ToggleGrid('" + box.slice(5) + "');";
     }
     if (box === "orbits") {
         return "ToggleOrbits();";
@@ -565,9 +593,9 @@ function PlaceHud() {
     var q = Camera.GetRotation(false);
     var p = Camera.GetPosition(false);
     var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
-    // centre of the panel, from its fixed top-right corner
-    var right = HUD_RIGHT_EDGE - HUD_WORLD_WIDTH / 2;
-    var up = HUD_TOP_EDGE - HUD_WORLD_WIDTH * hud.height / HUD_W / 2;
+    // centre of the panel, from its top-right corner (home corner + where it has been moved)
+    var right = HUD_RIGHT_EDGE + panelOffset.hud.x - HUD_WORLD_WIDTH / 2;
+    var up = HUD_TOP_EDGE + panelOffset.hud.y - HUD_WORLD_WIDTH * hud.height / HUD_W / 2;
     hud.canvas.SetPosition(new Vector3(
         p.x + f[0] * HUD_DISTANCE + r[0] * right + u[0] * up,
         p.y + f[1] * HUD_DISTANCE + r[1] * right + u[1] * up,
@@ -581,7 +609,7 @@ function PlaceHud() {
 // front of the camera every frame (children created at scale 1, the canvas shrunk after).
 // While it is open, left-drag doesn't orbit the camera, so the options can be clicked.
 const PIE_W = 600;                 // canvas units (square)
-const PIE_WORLD_WIDTH = 0.20;      // at HUD_DISTANCE: ~290 px on a 1903 x 1025 window
+const PIE_WORLD_WIDTH = 0.20 * UI_SCALE;   // at HUD_DISTANCE: ~290 px at UI_SCALE 1
 const PIE_FONT = 36;
 const PIE_COLOR = new Color(0.08, 0.09, 0.13, 0.88);
 const PIE_OPTIONS = [              // id, label, x, y, w, h (fractions of the canvas, top-left)
@@ -640,8 +668,8 @@ function UpdatePie() {
 
 // Pie menu actions. They act on the selection: a place or station (siteView), else the
 // focused spacecraft, else the Earth.
-//   Show info      the info panel, details of the selection (it follows the selection)
-//   Show data      the same panel, the next passes (a station's, a spacecraft's, or all)
+//   Show info      the info panel: details and next passes of the selection (it follows it)
+//   Show data      a spacecraft: the view from its instrument camera (see "Instrument view")
 //   Align camera   a spacecraft: look along its velocity vector (see UpdateAlign)
 //   Align vehicle  a spacecraft: the attitude panel (Sun / LVLH / Nadir / Zenith / Normal /
 //                  Target / Hold, see "Attitude")
@@ -650,7 +678,7 @@ function PieChoose(option) {
     if (option === "show-info") {
         ToggleInfo("info");
     } else if (option === "show-data") {
-        ToggleInfo("data");
+        ToggleInstrumentView();
     } else if (option === "align-camera") {
         ToggleAlignCamera();
     } else if (option === "align-vehicle") {
@@ -667,7 +695,7 @@ function PieChoose(option) {
 const INFO_W = 700;                // canvas units (a pass line is ~45 characters)
 const INFO_FONT = 28;              // 10 pt
 const INFO_LINE = 36;
-const INFO_LINES = 19;
+const INFO_LINES = 32;
 const INFO_PAD = 16;
 const INFO_REFRESH_FRAMES = 10;    // rewrite the text every 10 frames
 var info = null;                   // { canvas, background, text, height }
@@ -686,8 +714,11 @@ function CreateInfo() {
     info = { canvas: canvas, height: height };
     // children at canvas scale 1, the canvas shrunk afterwards (see CreateHud)
     info.background = MakeRowButton(canvas, "", 0, 0, 1, 1, PANEL_COLOR);
-    info.text = MakeText(canvas, "", INFO_PAD / INFO_W, INFO_PAD / height, 1 - 2 * INFO_PAD / INFO_W,
+    var gripW = 60 / INFO_W, gripH = 50 / height;
+    info.text = MakeText(canvas, "", INFO_PAD / INFO_W, INFO_PAD / height, 1 - 2 * INFO_PAD / INFO_W - gripW,
         1 - 2 * INFO_PAD / height, new Color(1, 1, 1, 1), INFO_FONT);
+    info.grip = MakeText(canvas, "::", 1 - INFO_PAD / INFO_W - gripW, INFO_PAD / height, gripW, gripH, GRIP_COLOR, INFO_FONT);
+    MakeRowButton(canvas, "StartMove('info');", 1 - INFO_PAD / INFO_W - gripW, INFO_PAD / height, gripW, gripH, ROW_COLOR);
     info.text.SetTextAlignment(TextAlignment.Left);
     PlaceInfo();
     canvas.SetVisibility(false);
@@ -714,8 +745,8 @@ function PlaceInfo() {
     var q = Camera.GetRotation(false);
     var p = Camera.GetPosition(false);
     var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
-    var right = -HUD_RIGHT_EDGE + width / 2;
-    var up = HUD_TOP_EDGE - height / 2;
+    var right = -HUD_RIGHT_EDGE + panelOffset.info.x + width / 2;
+    var up = HUD_TOP_EDGE + panelOffset.info.y - height / 2;
     info.canvas.SetPosition(new Vector3(
         p.x + f[0] * HUD_DISTANCE + r[0] * right + u[0] * up,
         p.y + f[1] * HUD_DISTANCE + r[1] * right + u[1] * up,
@@ -735,9 +766,6 @@ function UpdateInfo() {
 }
 
 function InfoText() {
-    if (infoMode === "data") {
-        return PassesText();
-    }
     var lines = [];
     if (siteView !== null) {
         var site = siteView.site;
@@ -761,6 +789,10 @@ function InfoText() {
                 }
             }
             lines.push("In beam     " + (inBeam.length > 0 ? inBeam.join(", ") : "none"));
+            lines.push("");
+            lines = lines.concat(BudgetSection(site, null));
+            lines.push("");
+            lines = lines.concat(PassLines("craft", site.name, 4));
         }
         if (siteView.mode === "ground") {
             lines.push("");
@@ -773,7 +805,7 @@ function InfoText() {
         lines.push(UtcString(elapsedSeconds));
         var about = fleetElements[focusTag] ? fleetElements[focusTag] : {};
         lines.push("Osculating elements about the " + (about.body || "Earth") + ", "
-            + (about.body === "Moon" ? "MoonInertial" : "EarthMJ2000Eq") + " (" + (about.source || "GMAT") + ")");
+            + (about.body === "Moon" ? "Moon equator of date" : "EarthMJ2000Eq") + " (" + (about.source || "GMAT") + ")");
         lines.push("");
         if (e === null) {
             lines.push("No elements in fleet.json: rerun tools/run_fleet.py");
@@ -795,6 +827,13 @@ function InfoText() {
             if (alignCamera) {
                 lines.push("Camera aligned to the velocity vector");
             }
+            if (instrumentView !== null) {
+                lines.push("Viewing through " + instrumentView.cam.name);
+            }
+            lines.push("");
+            lines = lines.concat(BudgetSection(null, focusTag));
+            lines.push("");
+            lines = lines.concat(PassLines("station", focusTag, 3));
         }
     } else {
         lines.push("Earth");
@@ -802,6 +841,8 @@ function InfoText() {
         lines.push("");
         lines.push("Select a spacecraft, place or ground station");
         lines.push("to see its details here.");
+        lines.push("");
+        lines = lines.concat(PassLines("both", null, 8));
     }
     return lines.join("\n");
 }
@@ -912,7 +953,7 @@ function VelocityAt(track, t) {
 // Every frame, after the spacecraft have moved: keep the camera with the focused spacecraft
 // (it is not parented to it), on the velocity line when Align camera is on.
 function FollowCraft() {
-    if (siteView !== null || focusEntity === null) {
+    if (instrumentView !== null || siteView !== null || focusEntity === null) {
         return;
     }
     if (!alignCamera) {
@@ -1164,7 +1205,10 @@ function CreateAttitudePanel() {
     attPanel = { canvas: canvas, height: height, buttons: {} };
     var fx = INFO_PAD / INFO_W, fw = 1 - 2 * fx, fh = ATT_ROW / height;
     MakeRowButton(canvas, "", 0, 0, 1, 1, PANEL_COLOR);
-    attPanel.header = MakeText(canvas, "", fx, INFO_PAD / height, fw, fh, new Color(0.5, 0.7, 1, 1), HUD_FONT);
+    var gripW = 0.12 * fw;
+    attPanel.grip = MakeText(canvas, "::", fx, INFO_PAD / height, gripW, fh, GRIP_COLOR, HUD_FONT);
+    MakeRowButton(canvas, "StartMove('att');", fx, INFO_PAD / height, gripW, fh, ROW_COLOR);
+    attPanel.header = MakeText(canvas, "", fx + gripW, INFO_PAD / height, fw - gripW, fh, new Color(0.5, 0.7, 1, 1), HUD_FONT);
     var colW = (fw - 0.02) / 2;
     for (var i = 0; i < ATT_MODES.length; i++) {
         var x = fx + (i % 2) * (colW + 0.02);
@@ -1213,8 +1257,8 @@ function PlaceAttitudePanel() {
     var q = Camera.GetRotation(false);
     var p = Camera.GetPosition(false);
     var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
-    var right = -HUD_RIGHT_EDGE + INFO_W * s / 2;
-    var up = AttitudePanelTop() - attPanel.height * s / 2;
+    var right = -HUD_RIGHT_EDGE + panelOffset.att.x + INFO_W * s / 2;
+    var up = AttitudePanelTop() + panelOffset.att.y - attPanel.height * s / 2;
     attPanel.canvas.SetPosition(new Vector3(
         p.x + f[0] * HUD_DISTANCE + r[0] * right + u[0] * up,
         p.y + f[1] * HUD_DISTANCE + r[1] * right + u[1] * up,
@@ -1236,68 +1280,351 @@ function UpdateAttitudePanel() {
 function OverLeftPanels(sx, sy) {
     var s = HUD_WORLD_WIDTH / HUD_W;
     var x = sx * HUD_DISTANCE, y = sy * HUD_DISTANCE;
-    var left = -HUD_RIGHT_EDGE, right = left + INFO_W * s;
-    if (x < left || x > right) {
-        return false;
-    }
-    if (infoOn && info !== null && y <= HUD_TOP_EDGE && y >= HUD_TOP_EDGE - info.height * s) {
+    var inside = function (off, top, height) {
+        var left = -HUD_RIGHT_EDGE + off.x;
+        return x >= left && x <= left + INFO_W * s && y <= top + off.y && y >= top + off.y - height;
+    };
+    if (infoOn && info !== null && inside(panelOffset.info, HUD_TOP_EDGE, info.height * s)) {
         return true;
     }
-    var top = AttitudePanelTop();
-    return attPanelOn && attPanel !== null && y <= top && y >= top - attPanel.height * s;
+    return attPanelOn && attPanel !== null && inside(panelOffset.att, AttitudePanelTop(), attPanel.height * s);
 }
 
-// ---- Passes (pie menu: Show data) ----
+// ---- Instrument view (pie menu: Show data) ----
+// For the focused spacecraft: the viewer's camera moves to the instrument camera found in its
+// model (models/source/<model>.glb, read by tools/instruments.py into fleet.json "instruments")
+// and looks where it looks, following the spacecraft's attitude. WebVerse scripts cannot set
+// the camera's field of view (only X3D worlds can), so a white frame marks the instrument's own
+// field of view in the ~59 deg view: what the instrument sees is inside the frame (no frame when
+// the instrument's view is wider than the screen's). Show data again, Earth / Moon, R, the arrow
+// keys or another spacecraft leave it. The camera can't be dragged or zoomed meanwhile.
+const FRAME_ID = "b0e5a000-0000-4000-a000-000000000004";
+const FRAME_DISTANCE = 0.62;       // between the Assets panel (0.6) and the labels (0.65)
+const VIEW_HALF_FOV_DEG = 29.5;    // the camera's measured vertical field of view is ~59 deg
+var instrumentDefs = {};           // model file -> [ { name, pos, fwd, up, yfov_deg, aspect } ]
+var instrumentView = null;         // { tag, cam } while the view is on
+var frameShown = false;
+var frameTag = null;               // { canvas, text } -- the "INSTRUMENT ..." caption
+
+function ToggleInstrumentView() {
+    if (instrumentView !== null) {
+        ExitInstrumentView();
+        PlaceCamera();
+        return;
+    }
+    if (siteView !== null || focusTag === "Earth" || focusTag === "Moon") {
+        Report("instrument view: select a spacecraft first");
+        return;
+    }
+    var model = fleetCraft[focusTag] && fleetCraft[focusTag].model ? fleetCraft[focusTag].model : "probe.glb";
+    var cams = instrumentDefs[model] || [];
+    if (cams.length === 0) {
+        Report("instrument view: no camera in models/source/" + model);
+        return;
+    }
+    alignCamera = false;
+    instrumentView = { tag: focusTag, cam: cams[0] };
+    Report("instrument view: " + cams[0].name + " on " + focusTag + ", " + cams[0].yfov_deg + " deg");
+}
+
+function ExitInstrumentView() {
+    instrumentView = null;
+    ShowFrame(false);
+}
+
+function CreateFrame() {
+    MeshEntity.Create(null, SELECT_URL, [SELECT_URL], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+        FRAME_ID, "OnFrameLoaded");
+    var canvas = CanvasEntity.Create(null, new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+        new Vector3(1, 1, 1), false, null, "instrument-caption");
+    canvas.SetVisibility(true);
+    canvas.MakeWorldCanvas();
+    canvas.SetSize(new Vector2(900, 60));
+    var text = MakeText(canvas, "", 0, 0, 1, 1, new Color(1, 1, 1, 1), INFO_FONT);
+    frameTag = { canvas: canvas, text: text };
+    canvas.SetVisibility(false);
+}
+
+function OnFrameLoaded(frame) {
+    frame.SetVisibility(false);
+}
+
+function ShowFrame(show) {
+    var frame = Entity.Get(FRAME_ID);
+    if (frame !== null && show !== frameShown) {
+        frame.SetVisibility(show);
+    }
+    frameShown = show;
+    if (frameTag !== null) {
+        frameTag.canvas.SetVisibility(instrumentView !== null);
+    }
+}
+
+// Every frame, after the spacecraft have moved and turned.
+function UpdateInstrumentView() {
+    if (instrumentView === null) {
+        return;
+    }
+    var e = Entity.GetByTag(instrumentView.tag);
+    if (e === null) {
+        return;
+    }
+    var att = Attitude(instrumentView.tag);
+    var q = { x: att.q[0], y: att.q[1], z: att.q[2], w: att.q[3] };
+    var p = e.GetPosition(false), sc = e.GetScale().x, c = instrumentView.cam;
+    var o = Rotate(q, c.pos[0] * sc, c.pos[1] * sc, c.pos[2] * sc);
+    var f = Rotate(q, c.fwd[0], c.fwd[1], c.fwd[2]), u = Rotate(q, c.up[0], c.up[1], c.up[2]);
+    var cam = new Vector3(p.x + o[0], p.y + o[1], p.z + o[2]);
+    var rot = LookRotation(f, u);
+    Camera.SetPosition(cam, false);
+    Camera.SetRotation(rot, false);
+    // the instrument's field of view, framed at FRAME_DISTANCE
+    var halfH = Math.tan(c.yfov_deg * Math.PI / 360) * FRAME_DISTANCE;
+    var fits = c.yfov_deg / 2 < VIEW_HALF_FOV_DEG;
+    ShowFrame(fits);
+    var cq = Camera.GetRotation(false);
+    var fw = Rotate(cq, 0, 0, 1), up = Rotate(cq, 0, 1, 0);
+    var frame = Entity.Get(FRAME_ID);
+    if (frame !== null && fits) {
+        frame.SetPosition(new Vector3(cam.x + fw[0] * FRAME_DISTANCE, cam.y + fw[1] * FRAME_DISTANCE,
+            cam.z + fw[2] * FRAME_DISTANCE), false);
+        frame.SetRotation(cq, false);
+        frame.SetScale(new Vector3(halfH * (c.aspect || 1), halfH, halfH), false);
+    }
+    if (frameTag !== null) {
+        var s = HUD_WORLD_WIDTH / HUD_W;
+        var above = (fits ? halfH : HUD_TOP_EDGE) + 0.012;
+        frameTag.canvas.SetScale(new Vector3(s, s, s), false);
+        frameTag.canvas.SetPosition(new Vector3(cam.x + fw[0] * FRAME_DISTANCE + up[0] * above,
+            cam.y + fw[1] * FRAME_DISTANCE + up[1] * above, cam.z + fw[2] * FRAME_DISTANCE + up[2] * above), false);
+        frameTag.canvas.SetRotation(cq, false);
+        frameTag.text.SetText("INSTRUMENT  " + c.name + " on " + (fleetNames[instrumentView.tag] || instrumentView.tag)
+            + "   field of view " + c.yfov_deg.toFixed(1) + "°" + (fits ? " (frame)" : " (wider than this view)"));
+    }
+}
+
+// ---- Link budgets (in Show info) ----
+// The equations of tools/linkbudget.py (free space, clear sky), worked out live from the current
+// range for every station / spacecraft pair in contact: the station's radio from
+// groundstations.xlsx (gain, noise temperature, Tx power), the spacecraft's from spacecraft.xlsx
+// (Payloads). Downlink: spacecraft EIRP, station G/T; uplink (2-way): station EIRP, spacecraft
+// G/T. Margin = Eb/N0 - the payload's required Eb/N0.
+const LIGHT_SPEED = 299792458.0;
+const BOLTZMANN_DB = -228.6;
+var fleetPayloads = {};          // tag -> { tx_w, gain_dbi, rate_bps, ebn0_req_db, gt_dbk, up_rate_bps, losses_db }
+
+function Log10(x) {
+    return Math.log(x) / Math.LN10;
+}
+
+function LinkBudget(rangeKm, site, pl) {
+    var fspl = 20 * Log10(4 * Math.PI * rangeKm * 1e3 * site.freqMhz * 1e6 / LIGHT_SPEED);
+    var loss = fspl + (pl.losses_db || 0);
+    var out = { fspl: fspl, down: null, up: null };
+    var ok = function (v) { return v !== null && v !== undefined; };
+    if (ok(pl.tx_w) && ok(pl.gain_dbi) && ok(pl.rate_bps) && ok(pl.ebn0_req_db) && ok(site.gainDbi) && ok(site.tsysK)) {
+        var eirp = 10 * Log10(pl.tx_w) + pl.gain_dbi;
+        var gt = site.gainDbi - 10 * Log10(site.tsysK);
+        var ebn0 = eirp - loss + gt - BOLTZMANN_DB - 10 * Log10(pl.rate_bps);
+        out.down = { ebn0: ebn0, margin: ebn0 - pl.ebn0_req_db };
+    }
+    if (site.link === "2-way" && ok(site.txW) && ok(site.gainDbi) && ok(pl.gt_dbk) && ok(pl.up_rate_bps) && ok(pl.ebn0_req_db)) {
+        var eirpUp = 10 * Log10(site.txW) + site.gainDbi;
+        var ebn0Up = eirpUp - loss + pl.gt_dbk - BOLTZMANN_DB - 10 * Log10(pl.up_rate_bps);
+        out.up = { ebn0: ebn0Up, margin: ebn0Up - pl.ebn0_req_db };
+    }
+    return out;
+}
+
+function Signed(x) {
+    return (x >= 0 ? "+" : "") + x.toFixed(1);
+}
+
+// Lines for one station / spacecraft pair in contact (label = the other end's name).
+function BudgetLines(site, tag, label) {
+    var craft = Entity.GetByTag(tag);
+    if (craft === null) {
+        return [];
+    }
+    var q = craft.GetPosition(false), p = site.trueWorld;
+    var rangeKm = Math.sqrt((q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y) + (q.z - p.z) * (q.z - p.z))
+        / KM_TO_WORLD_UNITS;
+    var head = label + "   range " + rangeKm.toFixed(0) + " km";
+    var pl = fleetPayloads[tag];
+    if (!pl) {
+        return [head, "   no radio for " + (fleetNames[tag] || tag) + " (spacecraft.xlsx, sheet Payloads)"];
+    }
+    if (site.gainDbi === null || site.gainDbi === undefined || site.tsysK === null || site.tsysK === undefined) {
+        return [head, "   no radio for " + site.name + " (antenna gain, noise temp: columns J-K)"];
+    }
+    var b = LinkBudget(rangeKm, site, pl);
+    var lines = [head + "   path loss " + b.fspl.toFixed(1) + " dB"];
+    if (b.down !== null) {
+        lines.push("   down " + (pl.rate_bps / 1000).toFixed(1) + " kbps: Eb/N0 " + b.down.ebn0.toFixed(1)
+            + " dB, margin " + Signed(b.down.margin) + " dB" + (b.down.margin < 0 ? "  NOT CLOSING" : ""));
+    }
+    if (b.up !== null) {
+        lines.push("   up " + (pl.up_rate_bps / 1000).toFixed(1) + " kbps: Eb/N0 " + b.up.ebn0.toFixed(1)
+            + " dB, margin " + Signed(b.up.margin) + " dB" + (b.up.margin < 0 ? "  NOT CLOSING" : ""));
+    }
+    return lines;
+}
+
+// The budget section of Show info: a station's contacts, or a spacecraft's stations.
+function BudgetSection(site, tag) {
+    var lines = ["Link budget (live)"];
+    if (site !== null) {
+        for (var t in site.links) {
+            if (linkShown[site.links[t]]) {
+                lines = lines.concat(BudgetLines(site, t, fleetNames[t] || t));
+            }
+        }
+    } else {
+        var stations = layers.stations.sites;
+        for (var i = 0; i < stations.length; i++) {
+            var id = stations[i].links[tag];
+            if (id && linkShown[id]) {
+                lines = lines.concat(BudgetLines(stations[i], tag, stations[i].name));
+            }
+        }
+    }
+    if (lines.length === 1) {
+        lines.push(site !== null ? "no spacecraft in the beam now" : "no ground station in contact now");
+    }
+    return lines;
+}
+
+// ---- Chart panel (with Show info) ----
+// While Show info is open on a ground station, its chart (tools/charts.py: contacts, elevation
+// and downlink margin per pass, a PNG from the fleet job, fleet.json "charts") shows in a panel
+// at the bottom right. An ImageEntity's picture is fixed when it is created, so the panel is
+// rebuilt when the station changes. "::" grip to move it, like the other panels.
+const CHART_W = 640;             // canvas units = the PNG's pixels
+const CHART_H = 780;
+const CHART_HEAD = 50;           // the grip row above the picture
+const CHART_BOTTOM = -0.30;      // view units at HUD_DISTANCE: the panel's home bottom edge
+var fleetCharts = {};            // station name -> "data/charts/<name>.png"
+var chartPanel = null;           // { canvas, parts, grip, file, height }
+
+function UpdateChartPanel() {
+    var want = null;
+    if (infoOn && siteView !== null && siteView.site.link) {
+        want = fleetCharts[siteView.site.name] || null;
+    }
+    if (chartPanel !== null && chartPanel.file !== want) {
+        for (var i = 0; i < chartPanel.parts.length; i++) {
+            try {
+                chartPanel.parts[i].Delete();
+            } catch (e) {
+                // a picture still loading: deleting the canvas below removes it
+            }
+        }
+        chartPanel.canvas.Delete();
+        chartPanel = null;
+    }
+    if (chartPanel === null && want !== null) {
+        CreateChartPanel(want);
+    }
+    if (chartPanel !== null) {
+        PlaceChartPanel();
+    }
+}
+
+function CreateChartPanel(file) {
+    var canvas = CanvasEntity.Create(null, new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+        new Vector3(1, 1, 1), false, null, "chart-panel");
+    canvas.SetVisibility(true);
+    canvas.MakeWorldCanvas();
+    var height = CHART_HEAD + CHART_H;
+    canvas.SetSize(new Vector2(CHART_W, height));
+    chartPanel = { canvas: canvas, parts: [], file: file, height: height };
+    var head = CHART_HEAD / height;
+    chartPanel.parts.push(MakeRowButton(canvas, "", 0, 0, 1, 1, PANEL_COLOR));
+    chartPanel.grip = MakeText(canvas, "::", 0.01, 0, 0.1, head, panelMove === "chart" ? GRIP_ARMED : GRIP_COLOR, INFO_FONT);
+    chartPanel.parts.push(chartPanel.grip);
+    chartPanel.parts.push(MakeRowButton(canvas, "StartMove('chart');", 0.01, 0, 0.1, head, ROW_COLOR));
+    // the picture loads asynchronously; it is made visible when it has (OnChartImageLoaded)
+    var image = ImageEntity.Create(canvas, DATA_BASE_URL + file, new Vector2(0, head), new Vector2(1, 1 - head),
+        null, null, "OnChartImageLoaded");
+    if (image !== null) {
+        chartPanel.parts.push(image);
+    }
+    PlaceChartPanel();
+    Report("chart: " + file);
+}
+
+function OnChartImageLoaded(image) {
+    if (image !== null) {
+        image.SetVisibility(true);
+    }
+}
+
+function ChartPanelTop() {
+    var s = HUD_WORLD_WIDTH / HUD_W;
+    return CHART_BOTTOM + chartPanel.height * s;
+}
+
+function PlaceChartPanel() {
+    var s = HUD_WORLD_WIDTH / HUD_W;
+    chartPanel.canvas.SetScale(new Vector3(s, s, s), false);
+    var q = Camera.GetRotation(false);
+    var p = Camera.GetPosition(false);
+    var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
+    var right = HUD_RIGHT_EDGE + panelOffset.chart.x - CHART_W * s / 2;
+    var up = CHART_BOTTOM + panelOffset.chart.y + chartPanel.height * s / 2;
+    chartPanel.canvas.SetPosition(new Vector3(
+        p.x + f[0] * HUD_DISTANCE + r[0] * right + u[0] * up,
+        p.y + f[1] * HUD_DISTANCE + r[1] * right + u[1] * up,
+        p.z + f[2] * HUD_DISTANCE + r[2] * right + u[2] * up), false);
+    chartPanel.canvas.SetRotation(q, false);
+}
+
+function OverChartPanel(sx, sy) {
+    if (chartPanel === null) {
+        return false;
+    }
+    var s = HUD_WORLD_WIDTH / HUD_W;
+    var x = sx * HUD_DISTANCE - panelOffset.chart.x, y = sy * HUD_DISTANCE - panelOffset.chart.y;
+    return x <= HUD_RIGHT_EDGE && x >= HUD_RIGHT_EDGE - CHART_W * s && y >= CHART_BOTTOM && y <= ChartPanelTop();
+}
+
+// ---- Passes (in Show info) ----
 // fleet.json "passes" (tools/run_fleet.py): each spacecraft's passes through each ground
 // station's beam over the run's window. The info panel lists the next ones still to end: for a
 // selected station its passes, for a spacecraft its passes over every station, otherwise all.
-const PASS_LINES = 12;
 var fleetPasses = [];
 
-function PassesText() {
-    var lines = [], list = [], title = "all ground stations", by = "both";
-    if (siteView !== null) {
-        if (!siteView.site.link) {
-            return siteView.site.name + "\n\nA place, not a ground station: it has no passes.\n"
-                + "Select a ground station, or a spacecraft for its passes.";
-        }
-        title = siteView.site.name;
-        by = "craft";
-    } else if (focusTag !== "Earth") {
-        title = fleetNames[focusTag] || focusTag;
-        by = "station";
-    }
+// The next passes still to end, as lines for the info panel: by "craft" for a station (named
+// key), by "station" for a spacecraft (tag key), "both" for all.
+function PassLines(by, key, max) {
+    var list = [], lines = [];
     for (var i = 0; i < fleetPasses.length; i++) {
         var p = fleetPasses[i];
         if (p.los < elapsedSeconds) {
             continue;
         }
-        if ((by === "craft" && p.station !== title) || (by === "station" && p.catalog !== focusTag)) {
+        if ((by === "craft" && p.station !== key) || (by === "station" && p.catalog !== key)) {
             continue;
         }
         list.push(p);
     }
-    lines.push("Next passes: " + title);
-    lines.push(UtcString(elapsedSeconds));
-    lines.push("AOS - LOS (UTC), duration, max elevation");
-    lines.push("");
+    lines.push("Next passes (AOS - LOS UTC, duration, max el)");
     if (list.length === 0) {
-        lines.push("No more passes in this run's window.");
-        lines.push("Update TLEs starts a new 13-hour window.");
+        lines.push("none left in this run's window (Update TLEs starts a new one)");
     }
-    for (var k = 0; k < list.length && k < PASS_LINES; k++) {
+    for (var k = 0; k < list.length && k < max; k++) {
         var q = list[k];
         var who = by === "craft" ? q.name : (by === "station" ? q.station : q.name + " / " + q.station);
         var dur = q.los - q.aos;
         var now = q.aos <= elapsedSeconds ? "   NOW" : "";
         lines.push(who + "   " + UtcString(q.aos).slice(12, 20) + " - " + UtcString(q.los).slice(12, 20)
             + "   " + Math.floor(dur / 60) + "m" + ("0" + Math.round(dur % 60)).slice(-2) + "s   "
-            + q.max_el.toFixed(1) + "°" + now);
+            + q.max_el.toFixed(1) + "\u00b0" + now);
     }
-    if (list.length > PASS_LINES) {
-        lines.push("... " + (list.length - PASS_LINES) + " more");
+    if (list.length > max) {
+        lines.push("... " + (list.length - max) + " more");
     }
-    return lines.join("\n");
+    return lines;
 }
 
 // ---- Orbit lines ----
@@ -1654,6 +1981,11 @@ function UpdateMoon() {
     }
     moon.SetPosition(moonNow.world, false);
     moon.SetRotation(new Quaternion(moonNow.q.x, moonNow.q.y, moonNow.q.z, moonNow.q.w), false);
+    var grid = Entity.Get(MOON_GRID_ID);
+    if (grid !== null && gridOn.Moon) {
+        grid.SetPosition(moonNow.world, false);
+        grid.SetRotation(new Quaternion(moonNow.q.x, moonNow.q.y, moonNow.q.z, moonNow.q.w), false);
+    }
 }
 
 // A spacecraft's position and velocity (GMAT km, km/s) relative to the body it orbits.
@@ -1808,6 +2140,7 @@ function CreateSites(key, list) {
             groundKm: list[n].ground_m / 1000,
             lat: list[n].lat, lon: list[n].lon, aglM: list[n].agl_m,
             freqMhz: list[n].freq_mhz, fovDeg: list[n].fov_deg,
+            gainDbi: list[n].gain_dbi, tsysK: list[n].tsys_k, txW: list[n].tx_w,
             below: key === "stations",     // label below the dot (places: above)
             layer: key };
         layer.sites.push(site);
@@ -2012,10 +2345,38 @@ function UpdateClick() {
         var look = Input.GetLookValue();
         clickDrag += Math.abs(look.x) + Math.abs(look.y);
     }
-    if (!down && mouseWasDown && clickDrag <= CLICK_MAX_DRAG && !pieOpen) {
+    if (!down && mouseWasDown && panelMove !== null && panelMoved) {
+        EndMove();
+    } else if (!down && mouseWasDown && clickDrag <= CLICK_MAX_DRAG && !pieOpen) {
         PickSite();
     }
     mouseWasDown = down;
+}
+
+// A panel's grip: arm it for moving (again: disarm). The next left-drag moves it.
+function StartMove(key) {
+    panelMove = panelMove === key ? null : key;
+    panelMoved = false;
+    ShowGrips();
+    Report("panel move: " + (panelMove || "off"));
+}
+
+function EndMove() {
+    Report("panel " + panelMove + " moved to " + panelOffset[panelMove].x.toFixed(3) + ", "
+        + panelOffset[panelMove].y.toFixed(3));
+    panelMove = null;
+    panelMoved = false;
+    ShowGrips();
+}
+
+function ShowGrips() {
+    var grips = { hud: hud !== null ? hud.grip : null, info: info !== null ? info.grip : null,
+        att: attPanel !== null ? attPanel.grip : null, chart: chartPanel !== null ? chartPanel.grip : null };
+    for (var key in grips) {
+        if (grips[key]) {
+            grips[key].SetColor(panelMove === key ? GRIP_ARMED : GRIP_COLOR);
+        }
+    }
 }
 
 function PickSite() {
@@ -2035,7 +2396,7 @@ function PickSite() {
     // the click, in view units
     var sx = (dx * r[0] + dy * r[1] + dz * r[2]) / df;
     var sy = (dx * u[0] + dy * u[1] + dz * u[2]) / df;
-    if (OverHud(sx, sy) || OverLeftPanels(sx, sy)) {
+    if (OverHud(sx, sy) || OverLeftPanels(sx, sy) || OverChartPanel(sx, sy)) {
         return;
     }
     var best = null, bestScore = Infinity;
@@ -2083,7 +2444,7 @@ function OverHud(sx, sy) {
     }
     var s = HUD_WORLD_WIDTH / HUD_W;
     var h = (hudOpen ? hud.height : HUD_PAD + HUD_ROW + HUD_GAP) * s;
-    var x = sx * HUD_DISTANCE, y = sy * HUD_DISTANCE;
+    var x = sx * HUD_DISTANCE - panelOffset.hud.x, y = sy * HUD_DISTANCE - panelOffset.hud.y;
     return x >= HUD_RIGHT_EDGE - HUD_WORLD_WIDTH && x <= HUD_RIGHT_EDGE && y <= HUD_TOP_EDGE && y >= HUD_TOP_EDGE - h;
 }
 
@@ -2320,32 +2681,48 @@ function UpdateSelectBox() {
     box.SetScale(new Vector3(half, half, half), false);
 }
 
-// ---- 10 degree grid ----
+// ---- 10 degree grids ----
 // Latitude / longitude lines every 10 deg (models/grid.glb, written by tools/places.py: unit
-// radius 1.0015, ~10 km above the surface; the equator and the Greenwich meridian in gold).
-// Earth-fixed like the globe, so RotateEarth turns it with the Earth. Off at start.
+// radius 1.0015 -- ~10 km above the Earth, ~3 km above the Moon; the equator and the prime
+// meridian in gold), one on each body. grid.glb is laid out like earth.glb and moon.glb, so the
+// Earth's grid turns with the Earth (RotateEarth) and the Moon's is placed and turned with the
+// Moon (UpdateMoon). Each is switched by the [#] box on its body's row in the Assets panel (L:
+// the grid of the body in view). Off at start.
 const GRID_URL = DATA_BASE_URL + "models/grid.glb";
 const GRID_ID = "b0e5a000-0000-4000-a000-000000000001";
-var gridOn = false;
+const MOON_GRID_ID = "b0e5a000-0000-4000-a000-000000000005";
+var gridOn = { Earth: false, Moon: false };
 
 function CreateGrid() {
     MeshEntity.Create(null, GRID_URL, [GRID_URL], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
         GRID_ID, "OnGridLoaded");
+    MeshEntity.Create(null, GRID_URL, [GRID_URL], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+        MOON_GRID_ID, "OnMoonGridLoaded");
 }
 
 function OnGridLoaded(grid) {
     grid.SetScale(new Vector3(EARTH_RADIUS, EARTH_RADIUS, EARTH_RADIUS), false);
-    grid.SetVisibility(gridOn);
+    grid.SetVisibility(gridOn.Earth);
 }
 
-function ToggleGrid() {
-    gridOn = !gridOn;
-    var grid = Entity.Get(GRID_ID);
+function OnMoonGridLoaded(grid) {
+    grid.SetScale(new Vector3(MOON_RADIUS, MOON_RADIUS, MOON_RADIUS), false);
+    grid.SetVisibility(gridOn.Moon);
+}
+
+function ToggleGrid(body) {
+    gridOn[body] = !gridOn[body];
+    var grid = Entity.Get(body === "Moon" ? MOON_GRID_ID : GRID_ID);
     if (grid !== null) {
-        grid.SetVisibility(gridOn);
+        grid.SetVisibility(gridOn[body]);
     }
     RefreshHudBoxes();
-    Report("grid " + (gridOn ? "on" : "off"));
+    Report(body + " grid " + (gridOn[body] ? "on" : "off"));
+}
+
+// The body in view: the Moon when it, or a site on it, is selected; otherwise the Earth.
+function BodyInView() {
+    return focusTag === "Moon" || (siteView !== null && siteView.site.body === "Moon") ? "Moon" : "Earth";
 }
 
 // ---- Diagnostics ----
@@ -2388,6 +2765,9 @@ function ApplyFleet(parsed) {
         windowEnd = Math.max(windowEnd, track[track.length - 1].t);
     }
     fleetCraft = parsed.craft || {};
+    instrumentDefs = parsed.instruments || {};
+    fleetPayloads = parsed.payloads || {};
+    fleetCharts = parsed.charts || {};
     moonSamples = parsed.moon ? parsed.moon.samples : [];
     CreateMissingCraft();
     fleetGeneratedT = parsed.generated_t;
@@ -2574,5 +2954,6 @@ CreatePie();
 CreateGrid();
 CreateMoon();
 CreateSelectBox();
+CreateFrame();
 Time.SetInterval(`Tick();`, 0);   // 0 = every frame
 HTTPNetworking.Fetch(EPHEMERIS_URL, "OnEphemerisLoaded");

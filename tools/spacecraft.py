@@ -11,8 +11,9 @@ one per row under the header row:
 - Body: Earth or Moon (blank = Earth): the body the spacecraft orbits.
 - Source: Elements or OEM.
   - Elements: osculating Keplerian elements at Epoch, about Body. Earth: EarthMJ2000Eq axes.
-    Moon: MoonInertial axes (Moon-centred, the lunar equator at J2000 -- GMAT's BodyInertial),
-    so INC 90 is a polar lunar orbit. GMAT propagates them with that body's gravity field
+    Moon: the Moon's equator of date at Epoch (Z = the lunar pole then, X = the ascending node
+    of the lunar equator on the Earth's J2000 equator, as GMAT's BodyInertial but with the
+    current pole), so INC 90 is a polar lunar orbit. GMAT propagates them with that body's gravity field
     (Earth: JGM-3 8x8; Moon: LP165P 10x10) plus the Earth / Moon and Sun as point masses.
     Epoch must be at or before the start of the run's window (an hour before the run).
   - OEM: a CCSDS OEM trajectory file, played back as given (no propagation): its path in the
@@ -121,6 +122,57 @@ def read_spacecraft(path=SPACECRAFT_XLSX):
     if errors:
         raise PlacesError("\n".join(errors))
     return craft
+
+
+PAYLOAD_FIELDS = [("tx_w", "Tx power (W)"), ("gain_dbi", "Antenna gain (dBi)"), ("rate_bps", "Downlink rate (bps)"),
+                  ("ebn0_req_db", "Required Eb/N0 (dB)"), ("gt_dbk", "Rx G/T (dB/K)"),
+                  ("up_rate_bps", "Uplink rate (bps)"), ("losses_db", "Other losses (dB)")]
+
+
+def read_payloads(path=SPACECRAFT_XLSX, tags_by_name=None):
+    """Sheet "Payloads": each spacecraft's radio for link budgets, one row per spacecraft:
+
+        Spacecraft | Tx power (W) | Antenna gain (dBi) | Downlink rate (bps) | Required Eb/N0 (dB)
+        | Rx G/T (dB/K) | Uplink rate (bps) | Other losses (dB)
+
+    Spacecraft is its name or catalog number (TLE spacecraft too). The downlink needs Tx power,
+    gain, rate and required Eb/N0; the uplink (2-way stations) needs Rx G/T and the uplink rate.
+    Other losses (pointing, polarisation, atmosphere, implementation) default to 0.
+    Returns {tag: {field: value or None}}; {} without the sheet."""
+    path = pick_file(path)
+    if path is None:
+        return {}
+    try:
+        rows = read_sheet(path, "Payloads")
+    except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
+        raise PlacesError(f"{path.name} could not be read as a spreadsheet ({e})")
+    if not rows or str((rows[0] + [None])[0] or "").strip() != "Spacecraft":
+        return {}                                   # no Payloads sheet (read_sheet fell back to the first)
+    tags_by_name = tags_by_name or {}
+    payloads, errors = {}, []
+    for n, row in enumerate(rows[1:], start=2):
+        row = (row + [None] * 8)[:8]
+        if all(c is None or (isinstance(c, str) and not c.strip()) for c in row):
+            continue
+        who = (f"{row[0]:g}" if isinstance(row[0], float) else str(row[0] or "")).strip()
+        tag = tags_by_name.get(who, tags_by_name.get(who.lower()))
+        if tag is None:
+            errors.append(f"{path.name} Payloads row {n}: no spacecraft called '{who}' (use its name or catalog number)")
+            continue
+        try:
+            p = {}
+            for (key, title), cell in zip(PAYLOAD_FIELDS, row[1:]):
+                p[key] = None if cell is None or (isinstance(cell, str) and not cell.strip()) else number(cell, title)
+            for key in ("tx_w", "rate_bps", "up_rate_bps"):
+                if p[key] is not None and p[key] <= 0:
+                    raise PlacesError(f"{dict(PAYLOAD_FIELDS)[key]} must be above 0")
+            p["losses_db"] = p["losses_db"] or 0.0
+            payloads[tag] = p
+        except PlacesError as e:
+            errors.append(f"{path.name} Payloads row {n}: {e}")
+    if errors:
+        raise PlacesError("\n".join(errors))
+    return payloads
 
 
 def read_oem_file(path):

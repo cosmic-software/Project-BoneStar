@@ -12,12 +12,15 @@ places.xlsx, sheet "Places", one place per row under the header row:
 
 groundstations.xlsx, sheet "Ground stations": the same five columns, then
 
-    Frequency (MHz) | Beam FOV (deg) | Link
+    Frequency (MHz) | Beam FOV (deg) | Link | Body | Antenna gain (dBi) | System noise temp (K) | Tx power (W)
 
 - Frequency: the station's operating frequency in MHz (e.g. 2250 for S-band).
 - Beam FOV: the full cone angle the station sees, centred straight up. 180 = horizon to
   horizon; 170 = down to 5 deg above the horizon. A spacecraft inside it is in contact.
 - Link: "1-way" (the station only receives: downlink) or "2-way" (uplink and downlink).
+- Antenna gain, system noise temperature, Tx power: the station's radio for link budgets
+  (optional; without gain and noise temperature the viewer shows no budget for the station;
+  Tx power is only used for the uplink of a 2-way link).
 
 - Latitude / Longitude: decimal degrees (north and east positive), or with a hemisphere
   letter ("28.6 N", "80.6 W"), or degrees-minutes-seconds ("28 36 30.2 N", 28°36'30.2"N).
@@ -258,15 +261,23 @@ def moon_fixed(lat_deg, lon_deg, h_km):
 
 
 def parse_station(cells):
-    """The ground-station columns: Frequency (MHz), Beam FOV (deg), Link."""
-    freq, fov, link = cells
+    """The ground-station columns: Frequency (MHz), Beam FOV (deg), Link, then (after Body) the
+    radio for link budgets, all optional: Antenna gain (dBi), System noise temperature (K),
+    Transmit power (W, the uplink of a 2-way link)."""
+    freq, fov, link, gain, tsys, tx = cells
     freq_mhz = parse_metres(freq, "Frequency")      # same rules: a number, blank = None
     fov_deg = parse_metres(fov, "Beam FOV")
     if freq_mhz is None or freq_mhz <= 0:
         raise PlacesError("Frequency (MHz) is needed and must be above 0")
     if fov_deg is None or not 0 < fov_deg <= 180:
         raise PlacesError("Beam FOV (deg) is needed, above 0 and at most 180")
-    return {"freq_mhz": freq_mhz, "fov_deg": fov_deg, "link": parse_link(link)}
+    radio = {"gain_dbi": parse_metres(gain, "Antenna gain"), "tsys_k": parse_metres(tsys, "System noise temperature"),
+             "tx_w": parse_metres(tx, "Transmit power")}
+    if radio["tsys_k"] is not None and radio["tsys_k"] <= 0:
+        raise PlacesError("System noise temperature (K) must be above 0")
+    if radio["tx_w"] is not None and radio["tx_w"] <= 0:
+        raise PlacesError("Transmit power (W) must be above 0")
+    return dict(radio, freq_mhz=freq_mhz, fov_deg=fov_deg, link=parse_link(link))
 
 
 def read_places(path=PLACES_XLSX):
@@ -292,7 +303,7 @@ def read_sites(path, sheet, extra=None):
         rows = read_sheet(path, sheet)
     except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
         raise PlacesError(f"{path.name} could not be read as a spreadsheet ({e})")
-    width = 9 if extra else 6
+    width = 12 if extra else 6            # stations: A-I, then the radio in J-L
     places, errors, names = [], [], set()
     for n, row in enumerate(rows[1:], start=2):     # row 1 is the header
         row = (row + [None] * width)[:width]
@@ -312,9 +323,9 @@ def read_sites(path, sheet, extra=None):
                      "lon": parse_angle(lon, "E", "W", 180, "Longitude"),
                      "agl_m": parse_metres(agl, "Altitude AGL") or 0.0,
                      "ground_m": parse_metres(ground, "Ground elevation"),
-                     "body": parse_body(row[width - 1])}
+                     "body": parse_body(row[8] if extra else row[5])}
             if extra:
-                place.update(extra(row[5:8]))
+                place.update(extra(row[5:8] + row[9:12]))
             if place["body"] == "Moon" and place["ground_m"] is None:
                 place["ground_m"], place["ground_source"] = 0.0, "mean lunar radius"
             names.add(name)
@@ -336,8 +347,10 @@ def read_sites(path, sheet, extra=None):
 
 # ---- models (unlit, flat colour; the viewer places and scales them) ----
 
-def write_glb(path, name, verts, parts, mode):
-    """parts: [(indices, colour)], one primitive and unlit material each."""
+def write_glb(path, name, verts, parts, mode, blend=False):
+    """parts: [(indices, colour)], one primitive and unlit material each. blend: an alpha-blended
+    material (at full opacity), which casts no shadow -- for lines, whose shadows the runtime's
+    directional sun otherwise lays across the Earth and the Moon."""
     vdata = b"".join(struct.pack("<3f", *v) for v in verts)
     data, views, accessors, prims, materials = vdata, [], [], [], []
     views.append({"buffer": 0, "byteOffset": 0, "byteLength": len(vdata), "target": 34962})
@@ -350,6 +363,7 @@ def write_glb(path, name, verts, parts, mode):
         accessors.append({"bufferView": len(views) - 1, "componentType": 5123, "count": len(indices), "type": "SCALAR"})
         prims.append({"attributes": {"POSITION": 0}, "indices": len(accessors) - 1, "mode": mode, "material": k})
         materials.append({"name": f"{name}{k}", "extensions": {"KHR_materials_unlit": {}},
+                          **({"alphaMode": "BLEND"} if blend else {}),
                           "pbrMetallicRoughness": {"baseColorFactor": list(colour) + [1], "metallicFactor": 0, "roughnessFactor": 1}})
         data += idata + b"\0" * (-len(idata) % 4)
     gltf = {
@@ -391,7 +405,7 @@ def write_link(path, dashed, colour=STATION_COLOUR, dashes=24):
     verts = [(0, 0, 0), (0, 1, 0)]
     if dashed:
         verts = [(0, (k + f) / dashes, 0) for k in range(dashes) for f in (0, 0.55)]
-    write_glb(path, "Link", verts, [(list(range(len(verts))), colour)], 1)
+    write_glb(path, "Link", verts, [(list(range(len(verts))), colour)], 1, blend=True)
 
 
 def write_grid(path=GRID_GLB, step=10, res=2, radius=1.0015,
@@ -417,7 +431,7 @@ def write_grid(path=GRID_GLB, step=10, res=2, radius=1.0015,
         line([point(lat, lon) for lat in range(-90, 91, res)], main if lon == 0 else minor)
     for lat in range(-90 + step, 90, step):     # parallels
         line([point(lat, lon) for lon in range(-180, 181, res)], main if lat == 0 else minor)
-    write_glb(path, "Grid", verts, [(minor, colour), (main, main_colour)], 1)
+    write_glb(path, "Grid", verts, [(minor, colour), (main, main_colour)], 1, blend=True)
 
 
 def write_select(path=SELECT_GLB, inner=0.82, colour=(1.0, 1.0, 1.0)):
