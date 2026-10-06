@@ -1,5 +1,7 @@
 # Project BoneStar
 
+**Author:** Ben Gavares (cosmic-software), with Claude (Anthropic).
+
 A pipeline for turning GMAT-propagated spacecraft orbits into a live, browser-viewable
 scene. GMAT does the orbital mechanics; the browser side (WebVerse) only ever consumes
 state and interpolates for playback -- it does no orbital computation itself.
