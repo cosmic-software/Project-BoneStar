@@ -352,6 +352,11 @@ builds the levels from NASA's CGI Moon Kit (downloaded once into `data/moon_sour
 (about 1.5 minutes), then **Update TLEs** so the viewer lists them. A level loads in the
 background and replaces the shown one when it is in; F logs the frame rate to the server log.
 
+For the full layout at the south pole -- the source files and their encoding, both projections
+with a latitude / longitude grid, the mesh rings and tiles, and where each site sits on every
+level -- see [docs/lunar-south-pole-layout.md](docs/lunar-south-pole-layout.md) (figure:
+`python tools/south_pole_map.py`).
+
 The Moon keeps its own coordinate system at every level: both UV maps are defined by latitude
 and longitude, not pixels, so a map of any resolution drops in. **UV0** is equirectangular
 (`u = 0.5 + lon/360`, `v = 0.5 - lat/180`) for the band up to 60 deg; **UV1** is polar
