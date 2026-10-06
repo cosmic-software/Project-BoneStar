@@ -727,12 +727,12 @@ def write_track(catalog, states, centre_t, colour, name, mu=MU_EARTH):
 
 
 def bake_moon(moon, t, stamp):
-    """Bake the 1x Moon's light for the Sun at t (s after the window start); removes earlier
-    runs' bakes (and WebVerse's cached copies of them). None if the 1x Moon isn't built."""
+    """Bake the 1x Moon's light for the Sun at t (s after the window start). None if the 1x
+    Moon isn't built. Earlier runs' bakes are removed only once fleet.json points at this one
+    (main), so a run that stops part-way leaves the viewer's Moon in place."""
     if 1 not in moon_levels():
         return None
     m = min(moon, key=lambda s: abs(s["t"] - t))
-    moon_light.clean(keep=set())
     name = moon_light.lit_name(1, stamp)
     secs = moon_light.bake(1, m["sun_mf"], moon_light.LIT_DIR / name, f"fleet run {stamp}, t = {m['t']:.0f} s")
     sun = [c / math.sqrt(sum(x * x for x in m["sun_mf"])) for c in m["sun_mf"]]
@@ -1014,6 +1014,8 @@ def main():
         "passes": passes,
     }
     OUT_JSON.write_text(json.dumps(payload))
+    if moon_lit:            # now fleet.json points at this run's bake: earlier ones can go
+        moon_light.clean(keep={Path(f).name for f in moon_lit["files"].values()})
     for p in places:
         print(f"Place {p['name']} ({p['body']}): {p['lat']:.5f}, {p['lon']:.5f}, ground {p['ground_m']:.0f} m + "
               f"{p['agl_m']:.0f} m AGL")
