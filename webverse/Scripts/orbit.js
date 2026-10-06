@@ -133,8 +133,17 @@ const DRAG_ZOOM_PER_PIXEL = 0.01;
 const EARTH_FRAMING = { start: 4 * EARTH_RADIUS, min: 1.05 * EARTH_RADIUS, max: 40 * EARTH_RADIUS };
 const SPACECRAFT_FRAMING = { start: 1.0, min: 0.9, max: 100 };
 
+// A spacecraft's framing follows its size (spacecraft.xlsx, Models, Scale): a smaller model
+// gets the camera nearer, down to SPACECRAFT_NEAREST (past the panels and labels, 0.35 / 0.40).
+const SPACECRAFT_NEAREST = 0.45;
+
 function Framing(tag) {
-    return tag === "Earth" ? EARTH_FRAMING : (tag === "Moon" ? MOON_FRAMING : SPACECRAFT_FRAMING);
+    if (tag === "Earth" || tag === "Moon") {
+        return tag === "Earth" ? EARTH_FRAMING : MOON_FRAMING;
+    }
+    var k = fleetCraft[tag] && fleetCraft[tag].size ? fleetCraft[tag].size : 1;
+    return { start: Math.max(SPACECRAFT_NEAREST, SPACECRAFT_FRAMING.start * k),
+        min: Math.max(SPACECRAFT_NEAREST, SPACECRAFT_FRAMING.min * k), max: SPACECRAFT_FRAMING.max };
 }
 
 var focusTag = "Earth";
@@ -1429,7 +1438,7 @@ function OverLeftPanels(sx, sy) {
 
 // ---- Instrument view (pie menu: Show data) ----
 // For the focused spacecraft: the viewer's camera moves to the instrument camera found in its
-// model (models/source/<model>.glb, read by tools/instruments.py into fleet.json "instruments")
+// model (models/<model>.glb, read by tools/instruments.py into fleet.json "instruments")
 // and looks where it looks, following the spacecraft's attitude. WebVerse scripts cannot set
 // the camera's field of view (only X3D worlds can), so a white frame marks the instrument's own
 // field of view in the ~59 deg view: what the instrument sees is inside the frame (no frame when
@@ -1456,7 +1465,7 @@ function ToggleInstrumentView() {
     var model = fleetCraft[focusTag] && fleetCraft[focusTag].model ? fleetCraft[focusTag].model : "probe.glb";
     var cams = instrumentDefs[model] || [];
     if (cams.length === 0) {
-        Report("instrument view: no camera in models/source/" + model);
+        Report("instrument view: no camera in models/" + model);
         return;
     }
     alignCamera = false;
@@ -2716,11 +2725,33 @@ function SegmentHitsSphere(a, b, c, radius, strict) {
     return cx * cx + cy * cy + cz * cz < radius * radius;
 }
 
-// Spacecraft listed in fleet.json without a mesh entity in index.veml get one from script:
-// probe.glb at scale 0.05 (as in index.veml), tagged with their tag once loaded.
-const CRAFT_URL = DATA_BASE_URL + "models/probe.glb";
+// Every spacecraft in fleet.json gets its model from script: fleet.json "craft" gives the file
+// (spacecraft.xlsx, sheet Models; probe.glb otherwise), the URL to load (a camera-free copy in
+// models/view/ when the model has instrument cameras) and the scale that draws it MODEL_LENGTH
+// long (tools/instruments.py). A spacecraft whose model changed (Update TLEs after editing the
+// sheet) gets the new one.
 var craftPending = {};           // entity id -> tag
+var craftModelUrl = {};          // tag -> the URL its entity was made from
 var craftIdCounter = 0;
+
+function CraftModel(tag) {
+    var c = fleetCraft[tag] || {};
+    return { url: DATA_BASE_URL + (c.url || "models/probe.glb"), scale: c.scale || 0.05 };
+}
+
+// The scale the sheet asks for, applied to an existing model too (no reload for a size change).
+function ResizeCraft() {
+    for (var n = 0; n < fleetTags.length; n++) {
+        var e = Entity.GetByTag(fleetTags[n]);
+        if (e !== null) {
+            var sc = CraftModel(fleetTags[n]).scale;
+            e.SetScale(new Vector3(sc, sc, sc), false);
+            if (fleetTags[n] === focusTag) {
+                focusScale = sc;
+            }
+        }
+    }
+}
 
 function CreateMissingCraft() {
     for (var n = 0; n < fleetTags.length; n++) {
@@ -2729,7 +2760,14 @@ function CreateMissingCraft() {
         for (var pid in craftPending) {
             already = already || craftPending[pid] === tag;
         }
-        if (Entity.GetByTag(tag) !== null || already) {
+        var m = CraftModel(tag);
+        var have = Entity.GetByTag(tag);
+        if (have !== null && craftModelUrl[tag] !== undefined && craftModelUrl[tag] !== m.url) {
+            have.tag = "";               // the model changed: replace it
+            have.Delete();
+            have = null;
+        }
+        if (have !== null || already) {
             continue;
         }
         craftIdCounter++;
@@ -2739,9 +2777,9 @@ function CreateMissingCraft() {
         }
         var id = "b0e5a000-0000-4000-b000-" + hex;
         craftPending[id] = tag;
-        MeshEntity.Create(null, CRAFT_URL, [CRAFT_URL], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
-            id, "OnCraftLoaded");
-        Report("fleet: creating a model for " + tag + " (" + fleetNames[tag] + ")");
+        craftModelUrl[tag] = m.url;
+        MeshEntity.Create(null, m.url, [m.url], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1), id, "OnCraftLoaded");
+        Report("fleet: creating " + tag + " (" + fleetNames[tag] + ") from " + m.url);
     }
 }
 
@@ -2749,10 +2787,16 @@ function OnCraftLoaded(entity) {
     for (var id in craftPending) {
         var e = Entity.Get(id);
         if (e !== null) {
-            e.tag = craftPending[id];
-            e.SetScale(new Vector3(0.05, 0.05, 0.05), false);
+            var tag = craftPending[id];
+            var sc = CraftModel(tag).scale;
+            e.tag = tag;
+            e.SetScale(new Vector3(sc, sc, sc), false);
             e.SetVisibility(true);
             delete craftPending[id];
+            if (focusTag === tag) {
+                focusEntity = e;         // the camera was following the old model
+                focusScale = sc;
+            }
         }
     }
 }
@@ -3475,6 +3519,7 @@ function ApplyFleet(parsed) {
         moonBuilt = parsed.moon.levels;
     }
     CreateMissingCraft();
+    ResizeCraft();
     fleetGeneratedT = parsed.generated_t;
     fleetElements = parsed.elements || {};
     fleetPasses = parsed.passes || [];

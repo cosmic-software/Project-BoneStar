@@ -194,6 +194,58 @@ def read_radios(path=SPACECRAFT_XLSX, tags_by_name=None):
     return radios
 
 
+def read_models(path=SPACECRAFT_XLSX, tags_by_name=None):
+    """Sheet "Models": which 3D model a spacecraft is drawn with, and how big, one row per
+    spacecraft:
+
+        Spacecraft | Model | Scale
+
+    Spacecraft is its name or catalog number (TLE spacecraft too); Model a .glb file name in
+    models/ (built to the convention in tools/instruments.py: +X along the velocity, the arrays
+    along Y; blank = probe.glb); Scale multiplies the standard size every model is drawn at
+    (blank = 1; 0.5 = half as long). Spacecraft not listed use probe.glb at scale 1.
+    Returns {tag: (file name, scale)}."""
+    path = pick_file(path)
+    if path is None:
+        return {}
+    try:
+        rows = read_sheet(path, "Models")
+    except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
+        raise PlacesError(f"{path.name} could not be read as a spreadsheet ({e})")
+    if not rows or [str(c or "").strip() for c in (rows[0] + [None, None])[:2]] != ["Spacecraft", "Model"]:
+        return {}                                   # no Models sheet (read_sheet fell back to the first)
+    tags_by_name = tags_by_name or {}
+    models, errors = {}, []
+    for n, row in enumerate(rows[1:], start=2):
+        row = (row + [None, None, None])[:3]
+        if all(c is None or (isinstance(c, str) and not c.strip()) for c in row):
+            continue
+        blank = lambda c: c is None or (isinstance(c, str) and not c.strip())
+        try:
+            scale = 1.0 if blank(row[2]) else number(row[2], "Scale")
+            if scale <= 0:
+                raise PlacesError("Scale must be above 0")
+        except PlacesError as e:
+            errors.append(f"{path.name} Models row {n}: {e}")
+            continue
+        who = (f"{row[0]:g}" if isinstance(row[0], float) else str(row[0] or "")).strip()
+        tag = tags_by_name.get(who, tags_by_name.get(who.lower()))
+        model = str(row[1] or "").strip()
+        if tag is None:
+            errors.append(f"{path.name} Models row {n}: no spacecraft called '{who}' (use its name or catalog number)")
+        elif not model:
+            models[tag] = ("probe.glb", scale)      # blank: the default model, maybe resized
+        elif "/" in model or "\\" in model or not model.lower().endswith(".glb"):
+            errors.append(f"{path.name} Models row {n}: '{model}' should be a .glb file name in models/")
+        elif not (ROOT / "models" / model).exists():
+            errors.append(f"{path.name} Models row {n}: no file models/{model}")
+        else:
+            models[tag] = (model, scale)
+    if errors:
+        raise PlacesError("\n".join(errors))
+    return models
+
+
 def read_payloads(path=SPACECRAFT_XLSX, tags_by_name=None):
     """Sheet "Payloads": each spacecraft's radio for link budgets, one row per spacecraft:
 

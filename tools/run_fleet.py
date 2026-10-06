@@ -39,7 +39,7 @@ from terrain import pa_to_me
 from places import site_key
 from plots import save_series
 from places import MOON_GLBS, MOON_RADIUS_KM, PlacesError, moon_levels, read_ground_stations, read_places, write_models
-from spacecraft import MU, kepler, read_oem_file, read_radios, read_spacecraft
+from spacecraft import MU, kepler, read_models, read_oem_file, read_radios, read_spacecraft
 from instruments import prepare_models
 from linkbudget import budget, pairs
 from charts import SERIES, colour, picture_glb, station_chart, terrain_chart, timeline_chart
@@ -62,6 +62,7 @@ EPOCH_FRAMES = ROOT / "data" / "epoch_frames.csv"
 EARTH_RADIUS_KM = 6378.1363
 TRACK_DIR = ROOT / "data" / "tracks"
 CHART_DIR = ROOT / "data" / "charts"
+DEFAULT_MODEL = "probe.glb"     # a spacecraft not on the Models sheet
 CHART_STEP = 15.0               # s between samples in a pass's chart profile
 MU_EARTH = 398600.4415          # km^3/s^2
 KM_TO_UNITS = 1 / 100           # viewer scale: 1 unit = 100 km
@@ -736,13 +737,6 @@ def main():
     if not icon.exists():
         picture_glb(ROOT / "webverse" / "icons" / "save.png", icon)
     terrain.prepare(places + stations)      # Moon sites: LOLA ground height and horizon masks
-    try:
-        instruments = prepare_models()      # cameras in models/source/*.glb; camera-free copies served
-    except (ValueError, KeyError) as e:
-        sys.exit(f"models/source: {e}")
-    for model, cams in instruments.items():
-        for cam in cams:
-            print(f"Instrument camera {cam['name']} in {model}: vertical FOV {cam['yfov_deg']:g} deg")
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     start, end = now - WINDOW_BEFORE, now + WINDOW_AFTER
 
@@ -761,8 +755,20 @@ def main():
         names_to_tags.update({c["name"]: c["tag"], c["name"].lower(): c["tag"], c["tag"]: c["tag"]})
     try:
         radios = read_radios(tags_by_name=names_to_tags)
+        craft_models = read_models(tags_by_name=names_to_tags)      # spacecraft.xlsx, sheet Models
     except PlacesError as e:
         sys.exit(str(e))
+    for c in crafts:
+        c["model"], c["model_scale"] = craft_models.get(c["tag"], (DEFAULT_MODEL, 1.0))
+    try:
+        models = prepare_models(c["model"] for c in crafts)        # models/: size, cameras, the copy served
+    except (ValueError, KeyError) as e:
+        sys.exit(f"models: {e}")
+    instruments = {name: m["cameras"] for name, m in models.items()}
+    for c in crafts:
+        m = models[c["model"]]
+        print(f"Model for {c['name']}: models/{c['model']} x {c['model_scale']:g} (scale {m['scale'] * c['model_scale']:g}"
+              + "".join(f", camera {cam['name']} {cam['yfov_deg']:g} deg" for cam in m["cameras"]) + ")")
     for tag, rs in radios.items():
         for r in rs:
             print(f"Radio {r['name']} on {tag}: " + ", ".join(f"{k} {v:g}" for k, v in r.items()
@@ -941,8 +947,11 @@ def main():
                              for m in moon]},
         "names": names,
         # each spacecraft: the body it orbits and where its trajectory came from
-        "craft": {c["tag"]: {"body": c["body"], "source": c["source"], "model": "probe.glb"} for c in crafts},
-        # instrument cameras found in models/source/<model>.glb, in the loaded model's axes:
+        # and its model (spacecraft.xlsx, Models): the file, the URL the viewer loads, its scale
+        "craft": {c["tag"]: {"body": c["body"], "source": c["source"], "model": c["model"],
+                             "url": models[c["model"]]["url"], "size": c["model_scale"],
+                             "scale": round(models[c["model"]]["scale"] * c["model_scale"], 8)} for c in crafts},
+        # instrument cameras found in models/<model>.glb, in the loaded model's axes:
         # {model: [{name, pos, fwd, up, yfov_deg, aspect}]} (see tools/instruments.py)
         "instruments": instruments,
         "tracks": tracks,                                          # orbit lines, one per half period

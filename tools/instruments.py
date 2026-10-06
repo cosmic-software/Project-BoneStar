@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
-"""Instrument cameras from spacecraft models.
+"""Spacecraft models: their size, their instrument cameras, and the copy the viewer loads.
 
-    python tools/instruments.py     list the cameras found in models/source/*.glb
+    python tools/instruments.py     list the models in models/ with their size and cameras
 
-Author a spacecraft model with one or more cameras in it (in Blender: add a Camera object,
-parent it to the model, point it along the instrument's boresight, set its field of view, and
-export glTF with cameras included) and save it as models/source/<name>.glb. The fleet job then:
+Every model lives in models/ (a .glb; spacecraft.xlsx, sheet Models, says which spacecraft
+uses which; probe.glb otherwise). Build them like probe.glb, in the exported .glb's axes:
 
-- reads every node of object type camera: where it sits and points in the model and its
-  vertical field of view (glTF cameras look along their local -Z, up +Y), converted to the
-  axes WebVerse gives the loaded model (glTFast mirrors X), and passes them to the viewer in
-  data/fleet.json ("instruments");
-- writes models/<name>.glb, the copy the viewer loads, with the cameras taken out. WebVerse
-  loads models with glTFast's default settings, which turn a glTF camera into a live Unity
-  camera -- one per spacecraft -- that would draw over the viewer's own camera. The copy is
-  rewritten only when its content changes (WebVerse caches models by URL).
+    +X  along the velocity: the front, and the instrument boresight (the attitude modes point
+        this axis: LVLH along the velocity, Nadir at the body below, Sun, Target ...)
+    Y   along the solar arrays (the attitude modes keep the arrays on the orbit normal)
 
-The viewer's Show data (pie menu) moves its camera to the instrument camera and frames the
-instrument's field of view (WebVerse scripts cannot change the camera's own field of view).
+(Blender's glTF export with +Y Up, the default, writes Blender's Z as the file's Y: in Blender,
+the arrays along Z.) A model may carry cameras for the instrument view (in Blender: add a Camera, parent it
+to the model, point it along the instrument, set its field of view, export with cameras). The
+fleet job then:
+
+- reads each camera: where it sits and points in the model and its vertical field of view
+  (glTF cameras look along their local -Z, up +Y), converted to the axes WebVerse gives the
+  loaded model (glTFast mirrors X), into data/fleet.json ("instruments");
+- writes models/view/<name>.glb, the copy the viewer loads, without the cameras: WebVerse loads
+  models with glTFast's default settings, which turn a glTF camera into a live Unity camera that
+  would draw over the viewer's own. A model without cameras is loaded as it is. Your file in
+  models/ is never changed;
+- measures the model's longest side, so every spacecraft is drawn at the same size on screen
+  (MODEL_LENGTH units: hugely enlarged, so it can be seen at all at 1 unit = 100 km).
 """
 import json
 import math
@@ -26,7 +32,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE_DIR = ROOT / "models" / "source"
 MODELS_DIR = ROOT / "models"
 
 
@@ -117,29 +122,61 @@ def strip_cameras(gltf):
     return g
 
 
-def prepare_models():
-    """{model file name: [cameras]} for every models/source/*.glb, writing the camera-free copy
-    the viewer loads into models/ when its content differs."""
-    instruments = {}
-    for src in sorted(SOURCE_DIR.glob("*.glb")):
+VIEW_DIR = MODELS_DIR / "view"
+MODEL_LENGTH = 1.64            # units: a model's longest side on screen (probe.glb's at scale 0.05)
+
+
+def longest_side(gltf):
+    """The model's longest bounding-box side (its own units), from every mesh's bounds."""
+    tr = world_transforms(gltf)
+    lo, hi = [math.inf] * 3, [-math.inf] * 3
+    for i, nd in enumerate(gltf.get("nodes", [])):
+        if "mesh" not in nd:
+            continue
+        t, r, sc = tr[i]
+        for pr in gltf["meshes"][nd["mesh"]]["primitives"]:
+            acc = gltf["accessors"][pr["attributes"]["POSITION"]]
+            mn, mx = acc["min"], acc["max"]
+            for cx in (mn[0], mx[0]):
+                for cy in (mn[1], mx[1]):
+                    for cz in (mn[2], mx[2]):
+                        v = qrot(r, [cx * sc[0], cy * sc[1], cz * sc[2]])
+                        for k in range(3):
+                            lo[k], hi[k] = min(lo[k], v[k] + t[k]), max(hi[k], v[k] + t[k])
+    return max(hi[k] - lo[k] for k in range(3))
+
+
+def prepare_models(names):
+    """{model file name: {cameras, url, scale}} for each model named (files in models/): the
+    URL the viewer loads (models/view/<name> when the model has cameras), and the scale that
+    draws it MODEL_LENGTH long."""
+    out = {}
+    for name in sorted(set(names)):
+        src = MODELS_DIR / name
+        if not src.exists():
+            raise ValueError(f"no model models/{name}")
         gltf, rest = read_glb(src)
-        instruments[src.name] = cameras(gltf)
-        served = MODELS_DIR / src.name
-        clean = strip_cameras(gltf)
-        current = read_glb(served) if served.exists() else None
-        if current is None or current[0] != clean or current[1] != rest:
-            write_glb(served, clean, rest)
-            print(f"models/{src.name}: rewritten from models/source/{src.name} without its cameras "
-                  f"(WebVerse caches models: clear its cached copy if the geometry changed)")
-    return instruments
+        cams = cameras(gltf)
+        url = f"models/{name}"
+        if cams:
+            VIEW_DIR.mkdir(exist_ok=True)
+            served = VIEW_DIR / name
+            clean = strip_cameras(gltf)
+            current = read_glb(served) if served.exists() else None
+            if current is None or current[0] != clean or current[1] != rest:
+                write_glb(served, clean, rest)
+                print(f"models/view/{name}: written from models/{name} without its cameras "
+                      f"(WebVerse caches models: clear its cached copy if the geometry changed)")
+            url = f"models/view/{name}"
+        out[name] = {"cameras": cams, "url": url, "scale": round(MODEL_LENGTH / longest_side(gltf), 6)}
+    return out
 
 
 if __name__ == "__main__":
-    found = {src.name: cameras(read_glb(src)[0]) for src in sorted(SOURCE_DIR.glob("*.glb"))}
-    if not found:
-        sys.exit(f"no models in {SOURCE_DIR}")
-    for name, cams in found.items():
-        print(f"{name}: {len(cams)} camera(s)")
+    for src in sorted(MODELS_DIR.glob("*.glb")):
+        gltf = read_glb(src)[0]
+        cams = cameras(gltf)
+        print(f"{src.name}: longest side {longest_side(gltf):.2f}, {len(cams)} camera(s)")
         for c in cams:
             print(f"  {c['name']}: at {c['pos']}, looking {c['fwd']}, up {c['up']}, "
                   f"vertical FOV {c['yfov_deg']:g} deg, aspect {c['aspect']:g}")

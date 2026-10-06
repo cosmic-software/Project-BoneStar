@@ -43,7 +43,8 @@ data/     generated output: OEMs, JSON, the generated GMAT script (not committed
 models/   probe.glb (spacecraft), earth.glb (NASA Blue Marble globe, unit radius),
           moon.glb (NASA LRO LROC colour map + LOLA terrain, unit mean radius; 1x,
           built by tools/make_moon.py, which also builds moon_2x.glb / moon_4x.glb locally),
-          source/ (models as authored, cameras included; see Instrument view),
+          probe.glb, probe_2.glb, ... (spacecraft models, see Spacecraft models;
+          view/ holds generated camera-free copies, not committed),
           atmosphere.glb (glow shells + night-side caps, unit = Earth radius),
           grid.glb (10 deg latitude / longitude lines, unit = Earth radius),
           select.glb (the white selection square),
@@ -211,6 +212,26 @@ exactly, and for the example (INC 90, AOP 0, TA 0) the spacecraft starts at Moon
 0.000 km, i.e. on the current lunar equator. Its passes over the example station 0.5 deg from
 the south pole now peak at ~83 deg (with the J2000 equator they peaked at ~47 deg).
 
+### Spacecraft models
+
+Every 3D model lives in `models/`. `spacecraft.xlsx`, sheet **Models**, says which spacecraft is
+drawn with which: Spacecraft (its name or catalog number; TLE spacecraft too), Model (a .glb
+file name in `models/`; blank = `probe.glb`) and Scale (multiplies the standard size: 0.5 = half
+as long; blank = 1). A spacecraft not listed is drawn with `probe.glb` at scale 1; the example
+lunar orbiter uses `probe_2.glb` at 0.5. The camera framing follows the scale, so a small model
+can be approached closer (down to 0.45 units, just past the panels). Build a model like `probe.glb`, in the exported file's axes:
+
+- **+X along the velocity**: the front, and the instrument boresight -- the axis the attitude
+  modes point (LVLH along the velocity, Nadir at the body below, Sun, Target);
+- **the solar arrays along Y** (Blender's Z with the default "+Y Up" glTF export) -- kept on
+  the orbit normal by the attitude modes.
+
+Every model is drawn the same length on screen (1.64 units, the probe's; real sizes would make
+the ISS 27 times a small probe, thousands of km across at 1 unit = 100 km). Cameras in a model
+become instrument views (below). After changing the sheet or a model, press **Update TLEs**; the
+viewer swaps the model. WebVerse caches models by URL: after re-exporting a model under the
+same name, clear its cached copy (`%LOCALAPPDATA%\Programs\webverse\wv_cache\...\models\`).
+
 ### The Moon
 
 GMAT reports the Moon's position and velocity every 60 s, and its orientation (Moon-fixed
@@ -320,12 +341,12 @@ shows the stations and their lines.
 Spacecraft models can carry instrument cameras. Author the model with a Camera object in it
 (in Blender: add a camera, parent it to the model, point it along the instrument's boresight,
 set its field of view, and export glTF with cameras included) and save it as
-`models/source/<name>.glb`. The fleet job (`tools/instruments.py`) finds every node of object
-type camera, passes its position, pointing and vertical field of view to the viewer, and writes
-`models/<name>.glb` -- the copy the viewer loads -- with the cameras taken out: WebVerse loads
-models with glTFast's default settings, which would turn each glTF camera into a live Unity
-camera drawing over the viewer's. `models/source/probe.glb` has one: "Instrument", at the
-telescope aperture, looking along the boresight, 10 deg field of view.
+`models/<name>.glb`. The fleet job (`tools/instruments.py`) finds every node of object type
+camera, passes its position, pointing and vertical field of view to the viewer, and writes
+`models/view/<name>.glb` -- the copy the viewer loads -- with the cameras taken out: WebVerse
+loads models with glTFast's default settings, which would turn each glTF camera into a live
+Unity camera drawing over the viewer's. Your file is never changed. `models/probe.glb` has one:
+"Instrument", at the telescope aperture, looking along the boresight, 10 deg field of view.
 
 **Show data** (spacecraft selected) moves the viewer's camera to the instrument camera, which
 follows the spacecraft's attitude (so Nadir or Target modes point it). WebVerse scripts cannot
