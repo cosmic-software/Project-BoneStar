@@ -8,8 +8,10 @@ The current fleet: the **ISS**, the **Hubble Space Telescope** and **NUSAT-50 (N
 from their public TLEs, and two polar **lunar orbiters** from Keplerian elements.
 
 <p align="center">
-  <img src="docs/images/earth-atlantic-day.png" width="560"
-       alt="The Earth from space over the Atlantic in daylight, with ISS (ZARYA) and HST labels">
+  <img src="docs/images/moon-earth-links.png" width="760"
+       alt="The Moon with lunar orbiter-1 and lunar orbiter-2, each joined by a link line to the Example station on the Earth; the Assets panel at the top right">
+  <br><sub>Both lunar orbiters in contact with the Example station on the Earth. A link line is
+  drawn only while the spacecraft is in the station's beam with nothing in the way.</sub>
 </p>
 
 ## Pipeline
@@ -157,11 +159,12 @@ What you see:
 - **Earth**: NASA Blue Marble (shaded relief and bathymetry), turned to GMAT's rotation angle
   and spinning at the sidereal rate, so each spacecraft is over the right place.
 - **Sunlight** from GMAT's Sun direction: a real day side and terminator.
-- **The Sun** itself in that direction, at its true size (0.53 deg across) with a soft glow.
+- **The Sun** itself in that direction, with a soft glow, drawn 4x its true size (2.1 deg
+  across instead of 0.53, which is only ~10 px on screen).
   It is far beyond what the camera draws (1 AU is ~1.5 million units; the far limit is 10000),
   so it is drawn 9000 units from the camera along the true line of sight -- correct from the
   Moon too -- and the Earth and the Moon pass in front of it (sunrise over a limb, eclipses).
-  `SUN_SIZE` in `orbit.js` enlarges it if wanted.
+  `SUN_SIZE` in `orbit.js` sets the enlargement (1 = true size).
 - **Atmosphere**: a basic blue glow around the limb, brighter on the day side, and a
   darkening night side with a soft terminator.
 - **Labels**: each spacecraft's name, facing the camera at any zoom.
@@ -170,21 +173,17 @@ What you see:
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/africa-after-sunset.png" alt="Africa just after sunset, a thin sunlit crescent on the western limb"><br>
-      <sub>Africa just after sunset: the day side has moved west with the Sun.</sub></td>
-    <td width="50%"><img src="docs/images/arctic-terminator.png" alt="The Arctic from above with the day/night line crossing Greenland"><br>
-      <sub>The Arctic just after the September equinox: the terminator runs almost through the pole.</sub></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/images/hubble-over-pacific.png" alt="Hubble over the Pacific in daylight, North America at the limb"><br>
-      <sub>Hubble over the Pacific, North America on the limb.</sub></td>
-    <td width="50%"><img src="docs/images/hubble-at-the-limb.png" alt="Hubble close to the limb with the atmosphere glow behind it"><br>
-      <sub>Hubble at the limb. Up close the glow's four shells show as bands (see Known issues).</sub></td>
+    <td width="50%"><img src="docs/images/orbiter-over-south-pole.png" alt="Ground view near the lunar south pole: lunar orbiter-1 overhead with link lines down to LID 1, the lunar south pole station and the Example lunar station"><br>
+      <sub>Ground view near the lunar south pole: lunar orbiter-1 passes overhead in contact with
+      three lunar stations at once. LID 1 is selected (white square).</sub></td>
+    <td width="50%"><img src="docs/images/orbiter-station-links.png" alt="Close-up of lunar orbiter-1 over the cratered south-pole terrain, with link lines to the three lunar stations and one more leaving the frame"><br>
+      <sub>Riding along with lunar orbiter-1 over the south pole. Each cyan line is a live link to a
+      station; the line leaving the frame goes to a station on the Earth.</sub></td>
   </tr>
 </table>
 
 <img src="docs/images/assets-panel.png" width="200" align="right"
-     alt="The Assets panel listing Earth, HST and ISS (ZARYA), with Earth selected">
+     alt="The Assets panel: Earth and Moon rows with grid boxes and the 1x Moon resolution box, the Spacecraft / Places / Ground stations tabs, All orbit lines, one row per spacecraft with its orbit-line box, and Update TLEs">
 
 | Control | Action |
 |---|---|
@@ -301,11 +300,11 @@ km), so the Moon (~3,800 units away) is always in range.
 
 ### Moon resolution
 
-<img src="docs/images/moon-south-pole-terrain.png" alt="Ground view at the lunar south pole at 2x: LOLA terrain on the polar-mapped caps, LID 1 selected, the two lunar ground stations below it, the Earth above the horizon">
-<sub>The lunar south pole in ground view at 2x: the cap beyond 60 deg is drawn with the polar
-(stereographic) maps, so the terrain stays sharp right at the pole. LID 1 is selected; the
-Example lunar station and the lunar south pole station sit on the terrain below it, and the
-Earth hangs above the horizon.</sub>
+<img src="docs/images/lunar-south-pole-close.png" alt="Low over the lunar south pole: LOLA terrain and craters lit by the low Sun, LID 1 selected with a link line, the Example lunar station and the lunar south pole station nearby">
+<sub>Low over the lunar south pole. The cap beyond 60 deg is drawn with the polar
+(stereographic) maps, so the terrain stays sharp right at the pole, and the low Sun picks out
+the crater rims. LID 1 is selected (white square) with a live link; the Example lunar station
+and the lunar south pole station sit on the terrain beside it.</sub>
 
 The Assets panel's Moon row has a small **1x v** drop-down: 1x, 2x or 4x. `tools/make_moon.py`
 builds the levels from NASA's CGI Moon Kit (downloaded once into `data/moon_source/`):
@@ -422,12 +421,12 @@ shadows from opaque meshes and those lines laid dark bands across the Earth and 
 
 ### Link budgets and charts
 
-<img src="docs/images/lunar-orbiter-link.png" alt="The example lunar orbiter in Nadir attitude with a link line past the Moon's limb to the Example station on Earth; the info panel lists its elements, the live link budget and the next passes">
-<sub>Line of sight: the example lunar orbiter (Nadir attitude) in contact with the Example
-station on the Earth, just above the Moon's limb. A link line is drawn only while the
-spacecraft is inside the station's beam and nothing blocks the line between them; the info
-panel shows its elements, the live link budget and the next passes, including the ones to the
-lunar south-pole stations.</sub>
+<img src="docs/images/orbiter-info-and-plot.png" alt="Show info on lunar orbiter-1: the info panel lists its osculating elements, attitude, a live link budget per station and radio and the next passes; the plot panel beside it shows its sunlight, direct-to-Earth and link elevations">
+<sub>Show info on lunar orbiter-1. Left: its elements about the Moon, its attitude, then the live
+link budget for every station that has it -- per radio, with range, rate, Eb/N0 and margin. The
+S- and X-band downlinks to the Example station on the Earth (370,500 km) are flagged NOT
+CLOSING; the lunar stations 100-118 km away close with 40-60 dB to spare. Then its next
+passes. Right: its plot (see Sun, direct-to-Earth and link plots).</sub>
 
 Links are worked out **radio by radio**, so a spacecraft can carry S-band TT&C, an X-band
 science downlink and a Ka-band link at once, and a station can have an antenna per band:
@@ -452,6 +451,19 @@ over 10,000 random cases (14,690 radio pairs).
 **Show info** on a station lists its radios and, for every spacecraft in its beam, the range and
 each shared band's downlink (and, for 2-way, uplink) frequency, rate, Eb/N0 and margin, live,
 flagged "NOT CLOSING" below 0 dB; on a spacecraft, the same for every station that has it.
+
+<table>
+  <tr>
+    <td width="34%" valign="top"><img src="docs/images/station-info-panel.png" alt="Show info on LID 1, a lunar ground station: location, sunlight and Earth-in-sight figures, terrain, its S- and X-band radios, the live link budget to lunar orbiter-1 and the next passes"><br>
+      <sub>Show info on LID 1, a station at the lunar south pole: where it is, its sunlight and
+      Earth visibility (now, 30 days, a year), its two radios, the live budget to lunar
+      orbiter-1 on each band, and the next passes.</sub></td>
+    <td width="66%" valign="top"><img src="docs/images/chart-station-passes.png" alt="The Passes chart for LID 1: contact timeline for both lunar orbiters, elevation through each pass, and downlink margin through each pass by radio"><br>
+      <sub>LID 1's Passes chart: contacts with both orbiters over the run's window, elevation
+      through each pass, and downlink margin through each pass -- solid S-band, dashed
+      X-band -- all well above 0 dB.</sub></td>
+  </tr>
+</table>
 
 The fleet job also draws a chart per station with matplotlib (`tools/charts.py`): its contacts
 over the window, elevation through each pass and downlink margin through each pass, one line
@@ -508,6 +520,16 @@ Show info on a Moon site lists the figures, and the chart panel shows its terrai
 horizon with the Sun's and the Earth's paths, the Sun's disc in view and when the Earth is in
 sight (a Moon ground station has a **Passes / Terrain** switch).
 
+<img src="docs/images/chart-station-terrain.png" width="470" align="right" alt="The Terrain chart for LID 1: the terrain horizon with the Sun's path and the Earth's path over the next 30 days, the share of the Sun's disc in view, and when the Earth is in sight">
+
+LID 1's Terrain chart (right). Top: the terrain horizon all around the site (grey), with the
+Sun's path (orange) circling low, 1-2 deg up, and hidden behind the ridge to the east; the
+Earth's path (blue) loops in the south-east, mostly behind the same ridge. Middle: the Sun is in view for most of the next 30 days, then the ridge
+hides it for about 12 days. Bottom: the Earth clears the ridge only briefly (1.5% of the time),
+so this site needs a relay -- the lunar orbiters -- to reach the Earth.
+
+<br clear="right">
+
 **Frames.** LOLA, LROC and the sites' coordinates use the Moon's Mean Earth frame (MOON_ME);
 GMAT's Moon-fixed axes are principal axes (MOON_PA). The fleet job turns GMAT's Moon-fixed
 directions into MOON_ME: a constant 103.85" rotation (~0.9 km at the surface), checked against
@@ -529,6 +551,18 @@ polar maps, which drop in through the same polar coordinate system (see Moon res
 With Show info open on a Moon site, a ground station or a spacecraft, an XY plot (matplotlib,
 `tools/charts.py` `timeline_chart`, made by the fleet job) hangs under the info panel and moves
 with it (its own "::" grip moves it apart). Over the run's window, on one UTC axis:
+
+<table>
+  <tr>
+    <td width="42%" valign="top"><img src="docs/images/plot-station-timeline.png" alt="LID 1's plot: Sun's disc in view near 100%, the Earth about 5 deg below the terrain, and link elevation through each pass of both lunar orbiters"><br>
+      <sub>A Moon station (LID 1): the Sun stays in view, the Earth stays about 5 deg below
+      the terrain all window, and the two orbiters pass overhead every hour or two.</sub></td>
+    <td width="58%" valign="top"><img src="docs/images/plot-orbiter-timeline.png" alt="Lunar orbiter-1 beside its plot: sunlight with an eclipse each orbit, the Earth rising and setting over the Moon's limb, and short passes over each station"><br>
+      <sub>A spacecraft (lunar orbiter-1): sunlight with an eclipse each orbit, the Earth rising
+      and setting over the Moon's limb (direct to Earth above the dashed line), and its passes
+      over each station.</sub></td>
+  </tr>
+</table>
 
 - **Sun**: the share of the Sun's disc in view -- above the terrain for a Moon site; past the
   Earth's and the Moon's shadows (umbra and penumbra) for a spacecraft. Checked against GMAT's
@@ -572,6 +606,23 @@ chart carries the fleet run's time along the bottom. PNGs are drawn at 400 dpi (
 The save icon (top right of this panel and of the chart panel) has the local server copy the
 plot as PNG and SVG into `exports/` (named after the plot and the UTC time saved; not
 committed). It needs `python tools/serve.py` running.
+
+### How a chart is made
+
+Every chart and plot in the viewer is drawn outside WebVerse, in Python, and shown as a picture:
+
+1. **Geometry.** The fleet job (`run_fleet.py`) works out the numbers from GMAT's trajectories:
+   passes, elevations, link margins (`linkbudget.py`), sunlight and Earth visibility
+   (`terrain.py` for Moon sites). Longer spans come from `longrun.py` on request.
+2. **Drawing.** `tools/charts.py` draws each chart with matplotlib in one house style: dark
+   background, one colour per spacecraft or station, quarter-hour ticks with a bold line and
+   label every hour, the UTC date in the axis title, and the fleet run's time in the footer. It
+   writes a 400 dpi PNG, an SVG of the same chart, and a `.glb` with the picture on a flat
+   square, all into `data/charts/`.
+3. **Showing it.** The viewer puts that `.glb` on its panel. It doesn't use WebVerse's own
+   image element, which fails in this runtime after the first world is unloaded.
+4. **Keeping it.** The save icon has `serve.py` copy the PNG and SVG into `exports/`, ready for
+   a report or slide.
 
 ## JSON shape
 
@@ -648,7 +699,7 @@ Known issues:
 
 Not built yet: a real-time clock sync (the viewer counts forward from the job's run time,
 so press Update TLEs, or rerun the fleet job, to bring it back to "now") and scheduling the
-fleet job.
+fleet job. Ideas for later are kept in [docs/FUTURE_IDEAS.md](docs/FUTURE_IDEAS.md).
 
 The Assets panel is drawn on a world-space canvas kept in front of the camera. Screen-space
 panels (HTML) were tried first and never became visible in this runtime.
