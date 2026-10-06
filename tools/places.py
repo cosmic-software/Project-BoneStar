@@ -61,6 +61,7 @@ MARKER_GLB = ROOT / "models" / "place.glb"
 STATION_GLB = ROOT / "models" / "station.glb"
 GRID_GLB = ROOT / "models" / "grid.glb"
 SELECT_GLB = ROOT / "models" / "select.glb"
+SUN_GLB = ROOT / "models" / "sun.glb"
 LINK_GLBS = {"2-way": ROOT / "models" / "link_2way.glb", "1-way": ROOT / "models" / "link_1way.glb"}
 PLACE_COLOUR = (1.0, 0.85, 0.2)         # yellow
 STATION_COLOUR = (0.3, 0.9, 1.0)        # cyan
@@ -488,10 +489,11 @@ def read_sites(path, sheet, extra=None):
 
 # ---- models (unlit, flat colour; the viewer places and scales them) ----
 
-def write_glb(path, name, verts, parts, mode, blend=False):
-    """parts: [(indices, colour)], one primitive and unlit material each. blend: an alpha-blended
-    material (at full opacity), which casts no shadow -- for lines, whose shadows the runtime's
-    directional sun otherwise lays across the Earth and the Moon."""
+def write_glb(path, name, verts, parts, mode, blend=False, double_sided=False):
+    """parts: [(indices, colour)], one primitive and unlit material each; colour is RGB, or RGBA
+    for a see-through part (needs blend). blend: an alpha-blended material (at full opacity
+    unless the colour says otherwise), which casts no shadow -- for lines, whose shadows the
+    runtime's directional sun otherwise lays across the Earth and the Moon."""
     vdata = b"".join(struct.pack("<3f", *v) for v in verts)
     data, views, accessors, prims, materials = vdata, [], [], [], []
     views.append({"buffer": 0, "byteOffset": 0, "byteLength": len(vdata), "target": 34962})
@@ -505,7 +507,8 @@ def write_glb(path, name, verts, parts, mode, blend=False):
         prims.append({"attributes": {"POSITION": 0}, "indices": len(accessors) - 1, "mode": mode, "material": k})
         materials.append({"name": f"{name}{k}", "extensions": {"KHR_materials_unlit": {}},
                           **({"alphaMode": "BLEND"} if blend else {}),
-                          "pbrMetallicRoughness": {"baseColorFactor": list(colour) + [1], "metallicFactor": 0, "roughnessFactor": 1}})
+                          **({"doubleSided": True} if double_sided else {}),
+                          "pbrMetallicRoughness": {"baseColorFactor": (list(colour) + [1])[:4], "metallicFactor": 0, "roughnessFactor": 1}})
         data += idata + b"\0" * (-len(idata) % 4)
     gltf = {
         "asset": {"version": "2.0", "generator": "BoneStar tools/places.py"},
@@ -589,6 +592,37 @@ def write_select(path=SELECT_GLB, inner=0.82, colour=(1.0, 1.0, 1.0)):
     write_glb(path, "Select", verts, [(idx, colour)], 4)
 
 
+def write_sun(path=SUN_GLB, glow_to=5.0, rings=24, segments=64,
+              core=(1.0, 0.97, 0.9), glow=(1.0, 0.82, 0.5)):
+    """The Sun as the viewer draws it: a disc of unit radius (the photosphere) in the XY plane,
+    with a glow around it out to `glow_to` radii -- `rings` flat annuli whose opacity falls off
+    as 0.45 r^-2.5, so their steps blend into one soft haze. The viewer turns it to face the
+    camera and scales it to the Sun's true angular size. Annuli don't overlap, so the order the
+    see-through parts are drawn in doesn't matter; double-sided, so the importer's mirroring
+    can't turn it away from the camera; blended, so it casts no shadow."""
+    verts = [(0.0, 0.0, 0.0)]
+
+    def circle(r):
+        start = len(verts)
+        for j in range(segments):
+            a = 2 * math.pi * j / segments
+            verts.append((r * math.cos(a), r * math.sin(a), 0.0))
+        return start
+
+    edge = circle(1.0)
+    parts = [([i for j in range(segments) for i in (0, edge + j, edge + (j + 1) % segments)], core)]
+    radii = [glow_to ** (k / rings) for k in range(rings + 1)]      # evenly spaced in log r
+    for r0, r1 in zip(radii, radii[1:]):
+        a, b = circle(r0), circle(r1)
+        idx = []
+        for j in range(segments):
+            j1 = (j + 1) % segments
+            idx += [a + j, b + j, b + j1, a + j, b + j1, a + j1]
+        mid = math.sqrt(r0 * r1)
+        parts.append((idx, tuple(glow) + (round(0.45 * mid ** -2.5, 4),)))
+    write_glb(path, "Sun", verts, parts, 4, blend=True, double_sided=True)
+
+
 def write_models():
     """The marker and link models, where missing (run_fleet.py calls this)."""
     if not MARKER_GLB.exists():
@@ -599,6 +633,8 @@ def write_models():
         write_grid()
     if not SELECT_GLB.exists():
         write_select()
+    if not SUN_GLB.exists():
+        write_sun()
     for link, path in LINK_GLBS.items():
         if not path.exists():
             write_link(path, link == "1-way")

@@ -336,6 +336,7 @@ function Tick() {
     Step("UpdateSites", UpdateSites);
     Step("UpdateLabels", UpdateLabels);
     Step("UpdateSelectBox", UpdateSelectBox);
+    Step("UpdateSun", UpdateSun);
     Step("UpdateHud", UpdateHud);
     Step("UpdateInfo", UpdateInfo);
     Step("UpdateAttitudePanel", UpdateAttitudePanel);
@@ -3418,6 +3419,47 @@ function UpdateSelectBox() {
     box.SetScale(new Vector3(half, half, half), false);
 }
 
+// ---- The Sun ----
+// models/sun.glb (tools/places.py write_sun: a unit disc, the photosphere, with a soft glow out
+// to 5 radii) in GMAT's Sun direction for the run, the same direction the light comes from. The
+// real Sun (1 AU = ~1.5 million units) is far past the camera's far clipping distance (10000), so
+// it is drawn SUN_DRAW_DISTANCE from the camera along the true line of sight -- from the camera
+// to the Sun at 1 AU from the Earth's centre, so it is right seen from the Moon too -- and scaled
+// to its true angular size (0.53 deg across). The Earth and the Moon (nearer than that) cover it
+// as they should: sunrise over the limb, eclipses. It faces the camera and is see-through-blended,
+// so it casts no shadow. SUN_SIZE scales it up from the true size if it is too small to see.
+const SUN_URL = DATA_BASE_URL + "models/sun.glb";
+const SUN_ID = "b0e5a000-0000-4000-a000-000000000006";
+const SUN_DRAW_DISTANCE = 9000;            // units, inside the far clipping distance (10000)
+const AU_UNITS = 149597870.7 * KM_TO_WORLD_UNITS;
+const SUN_RADIUS_KM = 695700;
+const SUN_SIZE = 1;                        // x the true angular size
+
+function CreateSun() {
+    MeshEntity.Create(null, SUN_URL, [SUN_URL], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+        SUN_ID, "OnSunLoaded");
+}
+
+function OnSunLoaded(sun) {
+    UpdateSun();
+}
+
+function UpdateSun() {
+    var sun = Entity.Get(SUN_ID);
+    if (sun === null) {
+        return;
+    }
+    var cam = CameraWorld();
+    // GMAT -> Unity axes (swap Y and Z), as for the light
+    var dx = sunDir[0] * AU_UNITS - cam.x, dy = sunDir[2] * AU_UNITS - cam.y, dz = sunDir[1] * AU_UNITS - cam.z;
+    var dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    var k = SUN_DRAW_DISTANCE / dist;
+    var r = SUN_SIZE * SUN_RADIUS_KM * KM_TO_WORLD_UNITS * k;
+    SetWorld(sun, new Vector3(cam.x + dx * k, cam.y + dy * k, cam.z + dz * k));
+    sun.SetRotation(Camera.GetRotation(false), false);
+    sun.SetScale(new Vector3(r, r, r), false);
+}
+
 // ---- 10 degree grids ----
 // Latitude / longitude lines every 10 deg (models/grid.glb, written by tools/places.py: unit
 // radius 1.0015 -- ~10 km above the Earth; the equator and the prime meridian in gold), one on
@@ -3705,5 +3747,6 @@ CreateGrid();
 CreateMoon();
 CreateSelectBox();
 CreateFrame();
+CreateSun();
 Time.SetInterval(`Tick();`, 0);   // 0 = every frame
 HTTPNetworking.Fetch(EPHEMERIS_URL, "OnEphemerisLoaded");

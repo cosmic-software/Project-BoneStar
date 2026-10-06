@@ -47,11 +47,59 @@ models/   probe.glb (spacecraft), earth.glb (NASA Blue Marble globe, unit radius
           view/ holds generated camera-free copies, not committed),
           atmosphere.glb (glow shells + night-side caps, unit = Earth radius),
           grid.glb (10 deg latitude / longitude lines, unit = Earth radius),
-          select.glb (the white selection square),
+          select.glb (the white selection square), sun.glb (the Sun: a disc with a soft glow),
           place.glb / station.glb (markers, unit spheres), link_2way.glb / link_1way.glb
           (station-to-spacecraft lines, unit length)
 webverse/ the WebVerse world: index.veml (scene) + Scripts/orbit.js (playback, camera)
 ```
+
+## Running it on your own PC (local server)
+
+BoneStar runs entirely on one machine: a small Python server serves this folder on
+`localhost:8000`, and the WebVerse desktop app loads the world from it.
+
+**You need**
+
+- Python 3.11+ with `numpy`, `matplotlib` and `pillow` (`pip install numpy matplotlib pillow`).
+- GMAT R2026a, with the `SPICESGP4` plugin enabled in its startup file. The tools expect
+  `F:\gmat-win-R2026a\bin\GmatConsole.exe`; set the `GMAT_CONSOLE` environment variable if
+  yours is somewhere else.
+- The WebVerse desktop app.
+- Optional: the lunar terrain maps. `python tools\make_moon.py` downloads them once into
+  `data/moon_source/`. Without them, Moon sites use a smooth sphere.
+
+**Steps** (PowerShell, from the project folder)
+
+1. Refresh the data (optional; the viewer's **Update TLEs** button does the same thing):
+   ```
+   python tools\update_tles.py
+   python tools\run_fleet.py
+   ```
+   `update_tles.py` fetches current TLEs from CelesTrak. `run_fleet.py` runs GMAT headless
+   and writes `data/fleet.json`, the orbit lines and the charts.
+2. Start the local server, and leave its window open while you use the viewer:
+   ```
+   python tools\serve.py
+   ```
+   It serves the project root on port 8000 and handles the viewer's requests: Update TLEs,
+   long plot spans and saving plots. If an older copy is still running, stop it (Ctrl+C)
+   and start it again so new features load.
+3. Open WebVerse and type this into its address bar:
+   ```
+   http://localhost:8000/webverse/index.veml
+   ```
+   Don't use a WorldHub `visitworld` link: it forces a WorldHub login first.
+
+**Good to know**
+
+- The viewer shows whatever is in the folder, including changes that aren't committed yet.
+- **Spreadsheet edits** (`places`, `groundstations`, `spacecraft`) take effect only after
+  **Update TLEs** or `run_fleet.py`. Reloading the world alone doesn't pick them up.
+- **Rebuilt models:** WebVerse caches models in
+  `%LOCALAPPDATA%\Programs\webverse\wv_cache\http~\localhost~8000\models\` and may keep
+  showing the old copy. Delete that model's cached file, then reload. Don't add `?v=N` to a
+  model URL: the cache file name becomes invalid on Windows and the world freezes.
+- The server writes its log to `data/server.log`.
 
 ## Running it
 
@@ -109,6 +157,11 @@ What you see:
 - **Earth**: NASA Blue Marble (shaded relief and bathymetry), turned to GMAT's rotation angle
   and spinning at the sidereal rate, so each spacecraft is over the right place.
 - **Sunlight** from GMAT's Sun direction: a real day side and terminator.
+- **The Sun** itself in that direction, at its true size (0.53 deg across) with a soft glow.
+  It is far beyond what the camera draws (1 AU is ~1.5 million units; the far limit is 10000),
+  so it is drawn 9000 units from the camera along the true line of sight -- correct from the
+  Moon too -- and the Earth and the Moon pass in front of it (sunrise over a limb, eclipses).
+  `SUN_SIZE` in `orbit.js` enlarges it if wanted.
 - **Atmosphere**: a basic blue glow around the limb, brighter on the day side, and a
   darkening night side with a soft terminator.
 - **Labels**: each spacecraft's name, facing the camera at any zoom.
