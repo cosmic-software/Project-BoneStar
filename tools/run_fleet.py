@@ -34,11 +34,15 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from places import MOON_RADIUS_KM, PlacesError, read_ground_stations, read_places, write_models
-from spacecraft import MU, kepler, read_oem_file, read_payloads, read_spacecraft
+import terrain
+from terrain import pa_to_me
+from places import site_key
+from plots import save_series
+from places import MOON_GLBS, MOON_RADIUS_KM, PlacesError, moon_levels, read_ground_stations, read_places, write_models
+from spacecraft import MU, kepler, read_oem_file, read_radios, read_spacecraft
 from instruments import prepare_models
-from linkbudget import budget
-from charts import station_chart
+from linkbudget import budget, pairs
+from charts import SERIES, colour, picture_glb, station_chart, terrain_chart, timeline_chart
 
 ROOT = Path(__file__).resolve().parent.parent
 TLE_DIR = ROOT / "tle"
@@ -230,8 +234,9 @@ def read_frames(start, now):
     Earth about the J2000 pole; the true pole is ~0.15 deg away, ~16 km at the surface.)
 
     Moon samples, one per row: [t, x, y, z, vx, vy, vz] (Earth-centred EarthMJ2000Eq, km, km/s)
-    and R, the Moon-fixed -> EarthMJ2000Eq rotation, solved from the Earth's and the Sun's
-    directions seen from the Moon in both frames (TRIAD).
+    and R, the Moon-fixed (Mean Earth, MOON_ME) -> EarthMJ2000Eq rotation, solved from the
+    Earth's and the Sun's directions seen from the Moon in both frames (TRIAD); with them the
+    Earth's and the Sun's Moon-fixed positions (km), for the terrain module.
     """
     rows, seen = [], set()
     lines = FRAMES.read_text().splitlines()
@@ -252,10 +257,13 @@ def read_frames(start, now):
         estimates.append(angle % 360.0)
         if sun is None or abs((t - now).total_seconds()) < abs((sun[0] - now).total_seconds()):
             sun = (t, (sx, sy, sz))
-        lpos, lvel, earth_mf, sun_mf = v[7:10], v[10:13], v[13:16], v[16:19]
+        # GMAT's Moon-fixed axes are principal axes (MOON_PA); turned into the Mean Earth frame
+        # (MOON_ME) of the LOLA / LROC maps and of the sites' coordinates (terrain.pa_to_me)
+        lpos, lvel, earth_mf, sun_mf = v[7:10], v[10:13], pa_to_me(v[13:16]), pa_to_me(v[16:19])
         earth_in = [-c for c in lpos]                                  # Earth seen from the Moon
         sun_in = [(sx, sy, sz)[k] - lpos[k] for k in range(3)]          # Sun seen from the Moon
-        moon.append({"t": dt, "pos": lpos, "vel": lvel, "R": triad(earth_in, sun_in, earth_mf, sun_mf)})
+        moon.append({"t": dt, "pos": lpos, "vel": lvel, "R": triad(earth_in, sun_in, earth_mf, sun_mf),
+                     "earth_mf": earth_mf, "sun_mf": sun_mf})
     # circular mean, then the spread of the estimates as a check
     mean = math.degrees(math.atan2(sum(math.sin(math.radians(a)) for a in estimates),
                                    sum(math.cos(math.radians(a)) for a in estimates))) % 360.0
@@ -363,7 +371,7 @@ def epoch_moon_frames(epochs):
         row = next(l for l in path.read_text().splitlines()[1:]
                    if l.split(",")[0].strip() == gmat_time(t))            # the row at the epoch itself
         v = [float(x) for x in row.split(",")[1:]]
-        lpos, sun, earth_mf, sun_mf = v[0:3], v[3:6], v[6:9], v[9:12]
+        lpos, sun, earth_mf, sun_mf = v[0:3], v[3:6], pa_to_me(v[6:9]), pa_to_me(v[9:12])
         out.append(triad([-c for c in lpos], [sun[i] - lpos[i] for i in range(3)], earth_mf, sun_mf))
         path.unlink()
     return out
@@ -408,8 +416,10 @@ def find_passes(objects, names, stations, rotation0, rate, moon):
     elevation in deg), sorted by AOS. The beam is the station's cone of fov_deg about straight
     up, i.e. elevation >= 90 - fov/2, and the line of sight must miss the Earth and the Moon
     (spheres): the same tests the viewer uses to draw link lines, with the same Earth rotation
-    (rotation0 + rate * t about the J2000 pole) and Moon samples. AOS / LOS are refined to
-    0.05 s and the maximum to ~0.1 s."""
+    (rotation0 + rate * t about the J2000 pole) and Moon samples. A Moon station with a terrain
+    horizon (tools/terrain.py) also needs the spacecraft above the terrain at its azimuth;
+    aos_by / los_by say what set each edge: "beam", "terrain", "body" (the Earth or the Moon in
+    the way) or "window". AOS / LOS are refined to 0.05 s and the maximum to ~0.1 s."""
     passes = []
     for st in stations:
         lat, lon = math.radians(st["lat"]), math.radians(st["lon"])
@@ -417,6 +427,9 @@ def find_passes(objects, names, stations, rotation0, rate, moon):
         site_f = st["ecef_km"]
         mask = 90.0 - st["fov_deg"] / 2.0
         on_moon = st.get("body") == "Moon"
+        horizon = st.get("terrain", {}).get("mask") if on_moon else None
+        east_f = (-math.sin(lon), math.cos(lon), 0.0)
+        north_f = (-math.sin(lat) * math.cos(lon), -math.sin(lat) * math.sin(lon), math.cos(lat))
 
         def station(t):
             """Station position and up, Earth-centred inertial."""
@@ -433,19 +446,40 @@ def find_passes(objects, names, stations, rotation0, rate, moon):
             states = [(o["t"], o["pos"], o["vel"]) for o in track]
             times = [x[0] for x in states]
 
-            def elevation(t):
-                """Elevation (deg) of the spacecraft above the station's horizon; -90 while the
-                Earth or the Moon (other than the station's own body) blocks the line of sight."""
+            def geometry(t):
+                """(elevation deg, what blocks the line of sight or None, terrain horizon at the
+                spacecraft's azimuth or None)."""
                 i = max(0, min(len(states) - 2, bisect.bisect_right(times, t) - 1))
                 x = hermite(states[i], states[i + 1], t)
                 p, up = station(t)
                 d = [x[k] - p[k] for k in range(3)]
                 dist = math.sqrt(sum(v * v for v in d))
+                el = math.degrees(math.asin(sum(d[k] * up[k] for k in range(3)) / dist))
                 blockers = [((0.0, 0.0, 0.0), EARTH_RADIUS_KM)] if on_moon else [(moon_state(moon, t)[0], MOON_RADIUS_KM)]
                 for centre, radius in blockers:
                     if segment_hits_sphere(p, x, centre, radius):
-                        return -90.0
-                return math.degrees(math.asin(sum(d[k] * up[k] for k in range(3)) / dist))
+                        return el, "body", None
+                if horizon is None:
+                    return el, None, None
+                R = moon_state(moon, t)[2]                       # into the Moon-fixed frame
+                dm = [sum(R[k][j] * d[k] for k in range(3)) for j in range(3)]
+                az = math.degrees(math.atan2(sum(dm[k] * east_f[k] for k in range(3)),
+                                             sum(dm[k] * north_f[k] for k in range(3)))) % 360.0
+                h = float(terrain.mask_at(horizon, az))
+                return el, ("terrain" if el < h else None), h
+
+            def elevation(t):
+                """Elevation (deg) of the spacecraft above the station's horizon; -90 while the
+                Earth, the Moon (other than the station's own body) or the terrain blocks it."""
+                el, blocked, _ = geometry(t)
+                return -90.0 if blocked else el
+
+            def limit(t_in, t_out):
+                """What ends visibility between an inside time and an outside one."""
+                el, blocked, h = geometry(t_out)
+                if blocked == "body" or (blocked == "terrain" and h > mask):
+                    return blocked
+                return "beam"                    # the beam's edge is the higher limit there
 
             def edge(t_out, t_in):                               # bisect the mask crossing
                 while abs(t_in - t_out) > 0.05:
@@ -478,7 +512,9 @@ def find_passes(objects, names, stations, rotation0, rate, moon):
                     max_t = (lo + hi) / 2
                     passes.append({"station": st["name"], "catalog": catalog, "name": names[catalog],
                                    "aos": round(aos, 2), "los": round(los, 2), "max_t": round(max_t, 1),
-                                   "max_el": round(elevation(max_t), 2)})
+                                   "max_el": round(elevation(max_t), 2),
+                                   "aos_by": "window" if aos <= t0 else limit(aos + 0.05, aos - 0.05),
+                                   "los_by": "window" if los >= t1 else limit(los - 0.05, los + 0.05)})
                 prev_in, t = now_in, tn
     return sorted(passes, key=lambda x: x["aos"])
 
@@ -506,6 +542,124 @@ def look(st, track, t, rotation0, rate, moon):
     d = [x[k] - p[k] for k in range(3)]
     dist = math.sqrt(sum(v * v for v in d))
     return math.degrees(math.asin(sum(d[k] * up[k] for k in range(3)) / dist)), dist
+
+
+SUN_RADIUS_KM = 695700.0
+LINK_STEP = 10.0          # s between samples of a pass on the timeline plots
+
+
+def disc_overlap(a, b, d):
+    """Area (sr, small-angle) where discs of angular radius a and b, d apart (rad), overlap."""
+    if d >= a + b:
+        return 0.0
+    if d <= abs(a - b):
+        return math.pi * min(a, b) ** 2
+    k = math.sqrt(max((-d + a + b) * (d + a - b) * (d - a + b) * (d + a + b), 0.0))
+    return (a * a * math.acos(max(-1.0, min(1.0, (d * d + a * a - b * b) / (2 * d * a))))
+            + b * b * math.acos(max(-1.0, min(1.0, (d * d + b * b - a * a) / (2 * d * b)))) - 0.5 * k)
+
+
+def sun_seen(x, sun, bodies):
+    """Share of the Sun's disc seen from x (km) past spheres [(centre, radius)] (umbra 0,
+    penumbra in between), all in one frame."""
+    ds = [sun[k] - x[k] for k in range(3)]
+    dsn = math.sqrt(sum(v * v for v in ds))
+    a = math.asin(SUN_RADIUS_KM / dsn)
+    seen = 1.0
+    for centre, radius in bodies:
+        db = [centre[k] - x[k] for k in range(3)]
+        dbn = math.sqrt(sum(v * v for v in db))
+        if dbn <= radius:
+            return 0.0
+        b = math.asin(radius / dbn)
+        sep = math.acos(max(-1.0, min(1.0, sum(ds[k] * db[k] for k in range(3)) / (dsn * dbn))))
+        seen -= disc_overlap(a, b, sep) / (math.pi * a * a)
+    return max(0.0, seen)
+
+
+def timelines(crafts, objects, names, stations, places, passes, moon, rotation, terrain_out, start, stamp, run=None):
+    """The XY plots under the viewer's info panel (tools/charts.py timeline_chart): for each
+    Moon site, ground station and spacecraft, over the run's window -- the Sun's disc in view,
+    the Earth's clearance (direct to Earth) and the elevation through each pass. Returns
+    {key: "data/charts/<file>.png"}, key = site name or "craft:<tag>"."""
+    ts = [m["t"] for m in moon]
+    times = [start + timedelta(seconds=t) for t in ts]
+    order = {c["tag"]: k for k, c in enumerate(crafts)}
+    st_order = {st["name"]: k for k, st in enumerate(stations)}
+    out = {}
+
+    def link_series(st, tag, label, col):
+        """A pass-by-pass elevation line (NaN between passes), sampled every LINK_STEP s."""
+        xs, ys = [], []
+        for ps in passes:
+            if ps["station"] != st["name"] or ps["catalog"] != tag:
+                continue
+            t = ps["aos"]
+            while True:
+                xs.append(start + timedelta(seconds=t))
+                ys.append(look(st, objects[tag], t, rotation, EARTH_RATE_DEG_PER_S, moon)[0])
+                if t >= ps["los"]:
+                    break
+                t = min(t + LINK_STEP, ps["los"])
+            xs.append(start + timedelta(seconds=ps["los"] + 0.001))
+            ys.append(float("nan"))
+        return (label, col, xs, ys) if xs else None
+
+    def write(key, title, rows):
+        slug = "".join(ch if ch.isalnum() else "-" for ch in key.lower()).strip("-")
+        name = f"timeline-{slug}_{stamp}.png"
+        timeline_chart(CHART_DIR / name, title, times, rows, run)
+        out[key] = f"data/charts/{name}"
+
+    # sites: a Moon site's Sun and Earth (terrain), a station's links
+    for site in places + stations:
+        rows = []
+        tr = terrain_out.get(site_key(site)) if site.get("body") == "Moon" else None
+        if tr:
+            w = tr["window"]
+            rows.append({"title": "Sun's disc in view (above the terrain)", "ylabel": "%", "ylim": (0, 105),
+                         "series": [("Sun", SERIES[1], times, [100 * v for v in w["sun"][:len(ts)]])]})
+            rows.append({"title": "Earth above the terrain (direct to Earth)", "ylabel": "°",
+                         "series": [("Earth", SERIES[0], times, w["earth_clear"][:len(ts)])],
+                         "ref": (0, "in sight above")})
+        if site in stations:
+            series = [link_series(site, c["tag"], names[c["tag"]], colour(order[c["tag"]])) for c in crafts]
+            series = [x for x in series if x]
+            rows.append({"title": "Links: spacecraft elevation through each pass", "ylabel": "elevation (°)",
+                         "ylim": (0, 90), "series": series, "ref": (90 - site["fov_deg"] / 2, "beam edge"),
+                         "empty": "no passes in this window"})
+        if rows:
+            write(site_key(site), f"{site['name']}: Sun, direct-to-Earth and link times (UTC)", rows)
+
+    # spacecraft: sunlight past the Earth and the Moon, the Earth past the Moon's limb, links
+    for c in crafts:
+        tag = c["tag"]
+        states = [(o["t"], o["pos"], o["vel"]) for o in objects[tag]]
+        st_times = [x[0] for x in states]
+        sun, earth = [], []
+        for m, t in zip(moon, ts):
+            i = max(0, min(len(states) - 2, bisect.bisect_right(st_times, t) - 1))
+            x = hermite(states[i], states[i + 1], t)
+            R = m["R"]
+            sun_in = [m["pos"][k] + sum(R[k][j] * m["sun_mf"][j] for j in range(3)) for k in range(3)]
+            sun.append(100 * sun_seen(x, sun_in, [((0.0, 0.0, 0.0), EARTH_RADIUS_KM), (m["pos"], MOON_RADIUS_KM)]))
+            if c["body"] == "Moon":
+                de = [-x[k] for k in range(3)]
+                dm = [m["pos"][k] - x[k] for k in range(3)]
+                den, dmn = math.sqrt(sum(v * v for v in de)), math.sqrt(sum(v * v for v in dm))
+                sep = math.degrees(math.acos(max(-1.0, min(1.0, sum(de[k] * dm[k] for k in range(3)) / (den * dmn)))))
+                earth.append(sep - math.degrees(math.asin(MOON_RADIUS_KM / dmn)))
+        rows = [{"title": "Sun's disc in view (Earth and Moon shadows)", "ylabel": "%", "ylim": (0, 105),
+                 "series": [("Sun", SERIES[1], times, sun)]}]
+        if c["body"] == "Moon":
+            rows.append({"title": "Earth's centre above the Moon's limb (direct to Earth)", "ylabel": "°",
+                         "series": [("Earth", SERIES[0], times, earth)], "ref": (0, "in sight above")})
+        series = [link_series(st, tag, st["name"], colour(st_order[st["name"]])) for st in stations]
+        series = [x for x in series if x]
+        rows.append({"title": "Links: elevation at each ground station through each pass", "ylabel": "elevation (°)",
+                     "ylim": (0, 90), "series": series, "empty": "no passes in this window"})
+        write("craft:" + tag, f"{names[tag]}: Sun, direct-to-Earth and link times (UTC)", rows)
+    return out
 
 
 def segment_hits_sphere(a, b, centre, radius):
@@ -578,6 +732,10 @@ def main():
     except PlacesError as e:
         sys.exit(str(e))
     write_models()
+    icon = ROOT / "models" / "save_icon.glb"          # the viewer's save button (a picture model)
+    if not icon.exists():
+        picture_glb(ROOT / "webverse" / "icons" / "save.png", icon)
+    terrain.prepare(places + stations)      # Moon sites: LOLA ground height and horizon masks
     try:
         instruments = prepare_models()      # cameras in models/source/*.glb; camera-free copies served
     except (ValueError, KeyError) as e:
@@ -597,16 +755,18 @@ def main():
         crafts.append(dict(c, gmat=f"SCE{k + 1}"))
     if not crafts:
         sys.exit(f"no spacecraft: no TLEs in {TLE_DIR} and no spacecraft sheet")
-    # radios for link budgets (spacecraft.xlsx, sheet Payloads), by name or catalog number
+    # radios for link budgets (spacecraft.xlsx, sheet Radios), by name or catalog number
     names_to_tags = {}
     for c in crafts:
         names_to_tags.update({c["name"]: c["tag"], c["name"].lower(): c["tag"], c["tag"]: c["tag"]})
     try:
-        payloads = read_payloads(tags_by_name=names_to_tags)
+        radios = read_radios(tags_by_name=names_to_tags)
     except PlacesError as e:
         sys.exit(str(e))
-    for tag, pl in payloads.items():
-        print(f"Payload radio for {tag}: " + ", ".join(f"{k} {v:g}" for k, v in pl.items() if v is not None))
+    for tag, rs in radios.items():
+        for r in rs:
+            print(f"Radio {r['name']} on {tag}: " + ", ".join(f"{k} {v:g}" for k, v in r.items()
+                                                            if isinstance(v, (int, float)) and v is not None))
     for c in crafts:
         if c["source"] != "oem" and c["epoch"] > start:
             kind = "TLE epoch" if c["source"] == "tle" else "Epoch"
@@ -711,7 +871,7 @@ def main():
 
     # charts: per ground station, its passes' elevation and downlink margin (matplotlib)
     CHART_DIR.mkdir(parents=True, exist_ok=True)
-    for old in CHART_DIR.glob("*.png"):
+    for old in [f for ext in ("png", "svg", "glb") for f in CHART_DIR.glob(f"*.{ext}")]:
         old.unlink()
     charts, order = {}, {c["tag"]: k for k, c in enumerate(crafts)}
     for st in stations:
@@ -721,9 +881,13 @@ def main():
             prof, t = [], ps["aos"]
             while True:
                 el, rng = look(st, objects[ps["catalog"]], t, rotation, EARTH_RATE_DEG_PER_S, moon)
-                pl = payloads.get(ps["catalog"])
-                down = budget(rng, st, pl)["down"] if pl else None
-                prof.append((t, el, rng, down["margin_db"] if down else None))
+                # downlink margin of every radio pair in a shared band: {band: dB}
+                margins = {}
+                for sr, cr, band in pairs(st["radios"], radios.get(ps["catalog"], [])):
+                    down = budget(rng, sr, cr, st["link"])["down"]
+                    if down is not None:
+                        margins[f"{band}: {cr['name']}"] = down["margin_db"]
+                prof.append((t, el, rng, margins))
                 if t >= ps["los"]:
                     break
                 t = min(t + CHART_STEP, ps["los"])
@@ -732,14 +896,35 @@ def main():
                                    look(st, objects[ps["catalog"]], ps["aos"], rotation, EARTH_RATE_DEG_PER_S, moon)[0])
         slug = "".join(ch if ch.isalnum() else "-" for ch in st["name"].lower()).strip("-")
         name = f"{slug}_{now:%Y%m%d%H%M}.png"          # unique per run: WebVerse caches by URL
-        station_chart(CHART_DIR / name, st, mine, profiles, order, names, start, end)
+        station_chart(CHART_DIR / name, st, mine, profiles, order, names, start, end, now)
         charts[st["name"]] = f"data/charts/{name}"
         print(f"Chart for {st['name']}: data/charts/{name} ({len(mine)} passes)")
     for ps in passes:
         ps.pop("profile_check", None)
 
-    site_fields = lambda p: {"name": p["name"], "body": p["body"], "lat": p["lat"], "lon": p["lon"],
-                             "agl_m": p["agl_m"], "ground_m": p["ground_m"], "ecef_km": p["ecef_km"]}
+    # Moon sites: sunlight and Earth in sight over the window and the next 30 / 365 days
+    moon_sites = [p for p in places + stations if p.get("terrain")]
+    terrain_out, terrain_charts = {}, {}
+    if moon_sites:
+        window = ([m["t"] for m in moon], [m["earth_mf"] for m in moon], [m["sun_mf"] for m in moon])
+        terrain_out = terrain.assess(moon_sites, window, now, GMAT_CONSOLE)
+        for p in moon_sites:
+            slug = "".join(ch if ch.isalnum() else "-" for ch in site_key(p).lower()).strip("-")
+            name = f"terrain-{slug}_{now:%Y%m%d%H%M}.png"
+            terrain_chart(CHART_DIR / name, p, terrain_out[site_key(p)], p.pop("_long30"), now)
+            terrain_charts[site_key(p)] = f"data/charts/{name}"
+    for p in moon_sites:
+        save_series(site_key(p), p.pop("_series30"), p.pop("_series365"), now)
+    timeline_files = timelines(crafts, objects, names, stations, places, passes, moon, rotation, terrain_out,
+                               start, f"{now:%Y%m%d%H%M}", now)
+    print(f"Timeline plots: {len(timeline_files)}")
+
+    def site_fields(p):
+        out = {"name": p["name"], "body": p["body"], "lat": p["lat"], "lon": p["lon"],
+               "agl_m": p["agl_m"], "ground_m": p["ground_m"], "ecef_km": p["ecef_km"]}
+        if "ground_m_levels" in p:      # Moon terrain drawn by each Moon level, m
+            out["ground_m_levels"] = {str(k): v for k, v in p["ground_m_levels"].items()}
+        return out
     payload = {
         "epoch": start.strftime("%d %b %Y %H:%M:%S.000"),          # UTC; t = seconds after this
         "generated": now.strftime("%d %b %Y %H:%M:%S.000"),
@@ -750,6 +935,8 @@ def main():
         # the Moon every 60 s: Earth-centred EarthMJ2000Eq position / velocity (km, km/s), and
         # q, the Moon entity's rotation in the viewer's (Unity) axes (Moon-fixed -> world)
         "moon": {"radius_km": MOON_RADIUS_KM,
+                 # the Moon models built (tools/make_moon.py): {"1": "models/moon.glb", ...}
+                 "levels": {str(lv): f"models/{MOON_GLBS[lv].name}" for lv in moon_levels()},
                  "samples": [[round(m["t"], 3)] + [round(x, 6) for x in m["pos"] + m["vel"]] + unity_quat(m["R"])
                              for m in moon]},
         "names": names,
@@ -761,16 +948,27 @@ def main():
         "tracks": tracks,                                          # orbit lines, one per half period
         # places.xlsx: body-fixed positions in km (Earth: WGS84; Moon: sphere), turned with the body
         "places": [site_fields(p) for p in places],
-        # groundstations.xlsx: the same, plus frequency, beam FOV (full cone about straight up)
+        # groundstations.xlsx: the same, plus beam FOV (full cone about straight up)
         # and link ("1-way" = receive only, "2-way")
-        "ground_stations": [dict(site_fields(p), freq_mhz=p["freq_mhz"], fov_deg=p["fov_deg"], link=p["link"],
-                                 gain_dbi=p["gain_dbi"], tsys_k=p["tsys_k"], tx_w=p["tx_w"]) for p in stations],
-        # spacecraft radios for link budgets (spacecraft.xlsx, Payloads): {tag: {tx_w, gain_dbi,
-        # rate_bps, ebn0_req_db, gt_dbk, up_rate_bps, losses_db}}; the viewer works out the budget
-        # (tools/linkbudget.py's equations) live from the range
-        "payloads": payloads,
+        # radios: [{name, band, up_band, down_mhz, up_mhz, gain_dbi, tsys_k, tx_w}] (Station radios sheet)
+        "ground_stations": [dict(site_fields(p), fov_deg=p["fov_deg"], link=p["link"], radios=p["radios"])
+                            for p in stations],
+        # spacecraft radios for link budgets (spacecraft.xlsx, Radios): {tag: [{name, band, up_band,
+        # down_mhz, up_mhz, tx_w, gain_dbi, rate_bps, ebn0_req_db, gt_dbk, up_rate_bps, losses_db}]};
+        # a station radio and a spacecraft radio in the same band make a link, whose budget the
+        # viewer works out live from the range (tools/linkbudget.py's equations)
+        "radios": radios,
         # per ground station, its chart (tools/charts.py): {station name: "data/charts/<name>.png"}
         "charts": charts,
+        # per Moon site (tools/terrain.py): {name: {dem, ground_m, eye_m, az_step, mask (horizon
+        # elevation deg per az_step from north through east), window: {t0, step, sun (disc
+        # fraction), earth_clear (deg above the terrain), sun_el}, next_30d / next_365d: {...}}}
+        "terrain": terrain_out,
+        # per Moon site, its terrain chart (horizon, Sun and Earth paths, sunlight)
+        "terrain_charts": terrain_charts,
+        # the XY plots under the info panel: {site name or "craft:<tag>": "data/charts/<file>.png"}
+        # (Sun, direct-to-Earth and link times over the window; an SVG beside each PNG)
+        "timelines": timeline_files,
         # Real-time clock for the viewer, whose Date.now is local time with fields only:
         # UTC = local - utc_offset_s; epoch as seconds since 1 Jan 00:00 UTC of epoch_year.
         "clock": {"epoch_year": start.year,
@@ -788,7 +986,8 @@ def main():
               f"{p['agl_m']:.0f} m AGL")
     for p in stations:
         print(f"Ground station {p['name']} ({p['body']}): {p['lat']:.5f}, {p['lon']:.5f}, ground {p['ground_m']:.0f} m + "
-              f"{p['agl_m']:.0f} m AGL, {p['freq_mhz']:g} MHz, FOV {p['fov_deg']:g} deg, {p['link']}")
+              f"{p['agl_m']:.0f} m AGL, radios " + ", ".join(f"{r['name']} {r['down_mhz']:g} MHz" for r in p["radios"])
+              + f", FOV {p['fov_deg']:g} deg, {p['link']}")
     print(f"Wrote {OUT_JSON} (window {start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} UTC)")
 
 

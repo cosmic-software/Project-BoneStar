@@ -8,6 +8,85 @@
 const EPHEMERIS_URL = "http://localhost:8000/data/fleet.json";
 const KM_TO_WORLD_UNITS = 1 / 100;
 
+// ---- Floating origin ----
+// Unity keeps positions as 32-bit floats: ~3,840 units out (the Moon) they step by ~0.00024
+// units (24 m), enough to make the panels shake by a pixel or two and close terrain shimmer
+// (measured in a recording: panels moved 0.08 px a frame near the Earth, 0.36-0.56 px at the
+// Moon). So the script keeps every position in its own (64-bit) world -- the Earth's centre at
+// 0, 1 unit = 100 km, as before -- and Unity's origin follows the camera: whatever goes to Unity
+// has origin subtracted (ToUnity), whatever comes back has it added (FromUnity). When the camera
+// is REBASE_DISTANCE from the origin, the origin moves to it (Rebase); things placed every frame
+// follow by themselves, the few that never move (the Earth, its atmosphere and grid, Earth orbit
+// lines) are put back by PlaceStatics.
+const REBASE_DISTANCE = 2;       // units (200 km)
+var origin = { x: 0, y: 0, z: 0 };
+var rebases = 0;                 // origin moves since the last report (orbiting a body from afar
+var rebaseReportFrame = -1e9;    // moves it every frame: reported at most every REPORT_EVERY frames)
+const REBASE_REPORT_EVERY = 600;
+
+function ToUnity(v) {
+    return new Vector3(v.x - origin.x, v.y - origin.y, v.z - origin.z);
+}
+
+function FromUnity(v) {
+    return new Vector3(v.x + origin.x, v.y + origin.y, v.z + origin.z);
+}
+
+function SetWorld(entity, v) {
+    entity.SetPosition(ToUnity(v), false);
+}
+
+function GetWorld(entity) {
+    return FromUnity(entity.GetPosition(false));
+}
+
+function CameraWorld() {
+    return FromUnity(Camera.GetPosition(false));
+}
+
+function SetCameraWorld(v) {
+    Camera.SetPosition(ToUnity(v), false);
+}
+
+function Rebase() {
+    var c = CameraWorld();
+    var dx = c.x - origin.x, dy = c.y - origin.y, dz = c.z - origin.z;
+    if (dx * dx + dy * dy + dz * dz < REBASE_DISTANCE * REBASE_DISTANCE) {
+        return;
+    }
+    origin = { x: c.x, y: c.y, z: c.z };
+    SetCameraWorld(c);
+    PlaceStatics();
+    rebases++;
+    if (infoFrame - rebaseReportFrame >= REBASE_REPORT_EVERY) {
+        Report("origin moved to " + c.x.toFixed(2) + ", " + c.y.toFixed(2) + ", " + c.z.toFixed(2)
+            + " (" + Math.sqrt(c.x * c.x + c.y * c.y + c.z * c.z).toFixed(1) + " units from the Earth; "
+            + rebases + " moves since the last report)");
+        rebases = 0;
+        rebaseReportFrame = infoFrame;
+    }
+}
+
+// Entities that stay put in the world: back to their places after the origin moved.
+function PlaceStatics() {
+    var zero = new Vector3(0, 0, 0);
+    var fixed = [Entity.GetByTag("Earth"), Entity.GetByTag("Atmosphere"), Entity.Get(GRID_ID)];
+    for (var i = 0; i < fixed.length; i++) {
+        if (fixed[i] !== null) {
+            SetWorld(fixed[i], zero);
+        }
+    }
+    for (var tag in orbitSegments) {
+        for (var k = 0; k < orbitSegments[tag].length; k++) {
+            var seg = orbitSegments[tag][k];
+            var line = Entity.Get(seg.id);
+            if (line !== null && (!seg.moon || moonNow !== null)) {
+                SetWorld(line, seg.moon ? moonNow.world : zero);   // Moon-centred lines sit on the Moon
+            }
+        }
+    }
+}
+
 var fleet = null;         // { catalog number: [ {t, pos, vel}, ... ] }
 var fleetNames = {};      // { catalog number: name from the TLE }
 var fleetTags = [];       // catalog numbers, in the order the left arrow cycles through them
@@ -81,13 +160,13 @@ function PlaceCamera() {
     var oy = camDistance * Math.sin(pitch);
     var oz = -camDistance * Math.cos(pitch) * Math.cos(yaw);
     if (focusEntity === null) {
-        Camera.SetPosition(new Vector3(ox, oy, oz), false);
+        SetCameraWorld(new Vector3(ox, oy, oz));
     } else {
         // Offset from the spacecraft in world space. The camera is not parented to it (the
         // spacecraft now turn with their attitude modes, which would spin a child camera), so
         // FollowCraft calls this every frame after the spacecraft has moved.
-        var p = focusEntity.GetPosition(false);
-        Camera.SetPosition(new Vector3(p.x + ox, p.y + oy, p.z + oz), false);
+        var p = GetWorld(focusEntity);
+        SetCameraWorld(new Vector3(p.x + ox, p.y + oy, p.z + oz));
     }
     Camera.SetEulerRotation(new Vector3(camPitch, camYaw, 0), false);
 }
@@ -139,6 +218,7 @@ var gWasDown = false;
 var oWasDown = false;
 var pWasDown = false;
 var lWasDown = false;
+var fWasDown = false;
 var atmosphereOn = true;
 
 function UpdateCamera() {
@@ -192,6 +272,13 @@ function UpdateCamera() {
         ToggleLayer("places");
     }
     pWasDown = pDown;
+    // F: measure the frame rate (server log)
+    var fDown = Input.GetKeyValue("f");
+    if (fDown && !fWasDown) {
+        StartFpsWatch();
+        Report("fps: measuring");
+    }
+    fWasDown = fDown;
     // L: grid on/off
     var lDown = Input.GetKeyValue("l");
     if (lDown && !lWasDown) {
@@ -229,21 +316,40 @@ function UpdateCamera() {
 // input and bring the camera to the selected site or spacecraft, then put the labels and the
 // panels where the camera now is. Separate timers for these made the panel and labels jitter.
 function Tick() {
-    UpdateOrbit();
-    UpdateAttitudes();
-    UpdateCamera();
-    UpdateClick();
-    FollowSite();
-    FollowCraft();
-    UpdateInstrumentView();
-    UpdateSites();
-    UpdateLabels();
-    UpdateSelectBox();
-    UpdateHud();
-    UpdateInfo();
-    UpdateAttitudePanel();
-    UpdateChartPanel();
-    UpdatePie();
+    Step("Rebase", Rebase);
+    Step("UpdateOrbit", UpdateOrbit);
+    Step("UpdateAttitudes", UpdateAttitudes);
+    Step("UpdateCamera", UpdateCamera);
+    Step("UpdateClick", UpdateClick);
+    Step("FollowSite", FollowSite);
+    Step("FollowCraft", FollowCraft);
+    Step("UpdateInstrumentView", UpdateInstrumentView);
+    Step("UpdateSites", UpdateSites);
+    Step("UpdateLabels", UpdateLabels);
+    Step("UpdateSelectBox", UpdateSelectBox);
+    Step("UpdateHud", UpdateHud);
+    Step("UpdateInfo", UpdateInfo);
+    Step("UpdateAttitudePanel", UpdateAttitudePanel);
+    Step("UpdateChartPanel", UpdateChartPanel);
+    Step("UpdatePlotPanel", UpdatePlotPanel);
+    Step("UpdatePie", UpdatePie);
+    Step("UpdateFpsWatch", UpdateFpsWatch);
+}
+
+// One step of Tick: a step that throws is reported (its name and the error; the first three
+// times, then every 600th) and the rest of the frame still runs.
+var stepErrors = {};
+
+function Step(name, fn) {
+    try {
+        fn();
+    } catch (e) {
+        var n = (stepErrors[name] || 0) + 1;
+        stepErrors[name] = n;
+        if (n <= 3 || n % 600 === 0) {
+            Report("tick error in " + name + " (" + n + "x): " + e);
+        }
+    }
 }
 
 
@@ -254,9 +360,14 @@ function Tick() {
 // while world-space canvases do -- the spacecraft labels use one.
 // Each row is a text with a translucent button laid over it: the runtime's button is an image
 // with no text, and a text on top would take the click, so the text goes underneath.
-const HUD_DISTANCE = 0.6;     // in front of the camera: past its 0.3 near plane, nearer than any
-                              // spacecraft (closest zoom is 0.9 units)
-// Placement in view units at HUD_DISTANCE. Measured from a 1903x1025 screenshot: ~1459 px per
+// Panels are drawn HUD_DISTANCE in front of the camera, just past its 0.3 near plane, so that
+// terrain close to the camera (riding with a low lunar orbiter, ~80 km = 0.8 units up) does not
+// cover them. Their layout is kept in view units at HUD_REF (0.6, where it was calibrated):
+// placing a panel moves it in to HUD_DISTANCE and shrinks it by VIEW_K, so it looks the same.
+const HUD_REF = 0.6;
+const HUD_DISTANCE = 0.35;
+const VIEW_K = HUD_DISTANCE / HUD_REF;
+// Placement in view units at HUD_REF. Measured from a 1903x1025 screenshot: ~1459 px per
 // unit (so the vertical FOV is ~59 deg) and the view centre at ~(953, 496) px. The top edge
 // sits below WebVerse's address bar (~150 px from the top of the window), the right edge ~210
 // px in from the right. It scales with the window, since it is fixed in angle, not pixels.
@@ -284,11 +395,12 @@ const TINT_PRESS = new Color(0.8, 0.8, 0.8, 1);
 var hud = null;               // { canvas, background, header, rows: [ { tag, text, button } ] }
 // Moving panels: each panel has a "::" grip. Click it, then drag (left button) and the panel
 // follows the mouse; releasing drops it. The camera stays still meanwhile. Offsets are in view
-// units at HUD_DISTANCE from each panel's home corner (lost on reload).
-const PX_TO_VIEW = 1 / 1459;  // view units per mouse pixel at HUD_DISTANCE (calibrated, see above)
+// units at HUD_REF from each panel's home corner (lost on reload).
+const PX_TO_VIEW = 1 / 1459;  // view units per mouse pixel at HUD_REF (calibrated, see above)
 const GRIP_COLOR = new Color(0.5, 0.7, 1, 1);
 const GRIP_ARMED = new Color(1, 0.85, 0.3, 1);
-var panelOffset = { hud: { x: 0, y: 0 }, info: { x: 0, y: 0 }, att: { x: 0, y: 0 }, chart: { x: 0, y: 0 } };
+var panelOffset = { hud: { x: 0, y: 0 }, info: { x: 0, y: 0 }, att: { x: 0, y: 0 }, chart: { x: 0, y: 0 },
+    plot: { x: 0, y: 0 } };
 var panelMove = null;         // the panel being moved ("hud", "info", "att"), or null
 var panelMoved = false;       // dragged since its grip was clicked
 var hudOpen = true;
@@ -330,8 +442,19 @@ var hudDirty = false;               // rebuild the panel on the next frame
 function HudLayout() {
     var white = new Color(1, 1, 1, 1);
     var rows = [{ tag: "Earth", name: "Earth", onClick: "SelectAsset('Earth');", color: white, box: "grid:Earth" },
-        { tag: "Moon", name: "Moon", onClick: "SelectAsset('Moon');", color: new Color(0.85, 0.85, 0.8, 1), box: "grid:Moon" },
-        { tabs: true }];
+        { tag: "Moon", name: "Moon", onClick: "SelectAsset('Moon');", color: new Color(0.85, 0.85, 0.8, 1), box: "grid:Moon",
+            res: true }];
+    if (moonResOpen) {
+        for (var m = 0; m < MOON_LEVELS.length; m++) {
+            var lv = MOON_LEVELS[m];
+            var built = !!moonBuilt[String(lv)];
+            rows.push({ tag: "moonres-" + lv, item: true, onClick: "SelectMoonLevel(" + lv + ");",
+                name: (lv === moonLevel ? "> " : "") + lv + "x  " + MOON_LEVEL_TRIANGLES[lv] + " triangles"
+                    + (built ? "" : "  (not built)"),
+                color: built ? new Color(0.85, 0.85, 0.8, 1) : new Color(0.5, 0.5, 0.5, 1) });
+        }
+    }
+    rows.push({ tabs: true });
     var items = [];
     if (hudTab === "craft") {
         rows.push({ tag: "all-orbits", name: "All orbit lines", onClick: "ToggleOrbits();",
@@ -423,15 +546,23 @@ function CreateHud() {
             continue;
         }
         var x = fx + (row.item ? HUD_INDENT * fw : 0);
-        var nameW = fx + fw - x - (row.box ? boxW + gap : 0);
+        var resW = 0.26 * fw;
+        var nameW = fx + fw - x - (row.box ? boxW + gap : 0) - (row.res ? resW + gap : 0);
         var rec = { tag: row.tag, box: row.box || null,
             text: HudPart(MakeText(canvas, row.name, x, y, nameW, fh, row.color, row.item ? HUD_ITEM_FONT : HUD_FONT), true),
             button: HudPart(MakeRowButton(canvas, row.onClick, x, y, nameW, fh, ROW_COLOR), true) };
+        var next = x + nameW + gap;
+        if (row.res) {
+            // the Moon's resolution: a small drop-down (its list opens as rows below)
+            HudPart(MakeText(canvas, MoonResLabel(), next, y, resW, fh, row.color, HUD_ITEM_FONT), true);
+            HudPart(MakeRowButton(canvas, "ToggleMoonRes();", next, y, resW, fh, moonResOpen ? ROW_SELECTED : ROW_COLOR), true);
+            next += resW + gap;
+        }
         if (row.box) {
-            rec.boxText = HudPart(MakeText(canvas, BoxText(row.box), x + nameW + gap, y, boxW, fh,
+            rec.boxText = HudPart(MakeText(canvas, BoxText(row.box), next, y, boxW, fh,
                 row.box.indexOf("orbit") === 0 ? new Color(1, 0.85, 0.55, 1)
                     : (row.box.indexOf("grid") === 0 ? GRID_BOX_COLOR : row.color)), true);
-            rec.boxButton = HudPart(MakeRowButton(canvas, BoxClick(row.box), x + nameW + gap, y, boxW, fh,
+            rec.boxButton = HudPart(MakeRowButton(canvas, BoxClick(row.box), next, y, boxW, fh,
                 ROW_COLOR), true);
         }
         if (row.update) {
@@ -526,8 +657,8 @@ function RefreshHudBoxes() {
 
 function ReportHud() {
     var sc = hud.canvas.GetScale();
-    var p = hud.canvas.GetPosition(false);
-    var c = Camera.GetPosition(false);
+    var p = GetWorld(hud.canvas);
+    var c = CameraWorld();
     var dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z;
     var child = hud.rows[0].button.GetScale();
     Report("hud: scale " + sc.x.toFixed(6) + " (want " + (HUD_WORLD_WIDTH / HUD_W).toFixed(6)
@@ -589,17 +720,17 @@ function UpdateHud() {
 
 function PlaceHud() {
     var s = HUD_WORLD_WIDTH / HUD_W;
-    hud.canvas.SetScale(new Vector3(s, s, s), false);
+    hud.canvas.SetScale(new Vector3(s * VIEW_K, s * VIEW_K, s * VIEW_K), false);
     var q = Camera.GetRotation(false);
-    var p = Camera.GetPosition(false);
+    var p = CameraWorld();
     var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
     // centre of the panel, from its top-right corner (home corner + where it has been moved)
     var right = HUD_RIGHT_EDGE + panelOffset.hud.x - HUD_WORLD_WIDTH / 2;
     var up = HUD_TOP_EDGE + panelOffset.hud.y - HUD_WORLD_WIDTH * hud.height / HUD_W / 2;
-    hud.canvas.SetPosition(new Vector3(
-        p.x + f[0] * HUD_DISTANCE + r[0] * right + u[0] * up,
-        p.y + f[1] * HUD_DISTANCE + r[1] * right + u[1] * up,
-        p.z + f[2] * HUD_DISTANCE + r[2] * right + u[2] * up), false);
+    SetWorld(hud.canvas, new Vector3(
+        p.x + f[0] * HUD_DISTANCE + (r[0] * right + u[0] * up) * VIEW_K,
+        p.y + f[1] * HUD_DISTANCE + (r[1] * right + u[1] * up) * VIEW_K,
+        p.z + f[2] * HUD_DISTANCE + (r[2] * right + u[2] * up) * VIEW_K));
     hud.canvas.SetRotation(q, false);
 }
 
@@ -609,7 +740,7 @@ function PlaceHud() {
 // front of the camera every frame (children created at scale 1, the canvas shrunk after).
 // While it is open, left-drag doesn't orbit the camera, so the options can be clicked.
 const PIE_W = 600;                 // canvas units (square)
-const PIE_WORLD_WIDTH = 0.20 * UI_SCALE;   // at HUD_DISTANCE: ~290 px at UI_SCALE 1
+const PIE_WORLD_WIDTH = 0.20 * UI_SCALE;   // at HUD_REF: ~290 px at UI_SCALE 1
 const PIE_FONT = 36;
 const PIE_COLOR = new Color(0.08, 0.09, 0.13, 0.88);
 const PIE_OPTIONS = [              // id, label, x, y, w, h (fractions of the canvas, top-left)
@@ -642,12 +773,12 @@ function CreatePie() {
 
 function PlacePie() {
     var s = PIE_WORLD_WIDTH / PIE_W;
-    pie.canvas.SetScale(new Vector3(s, s, s), false);
+    pie.canvas.SetScale(new Vector3(s * VIEW_K, s * VIEW_K, s * VIEW_K), false);
     var q = Camera.GetRotation(false);
-    var p = Camera.GetPosition(false);
+    var p = CameraWorld();
     var f = Rotate(q, 0, 0, 1);
-    pie.canvas.SetPosition(new Vector3(p.x + f[0] * HUD_DISTANCE, p.y + f[1] * HUD_DISTANCE,
-        p.z + f[2] * HUD_DISTANCE), false);
+    SetWorld(pie.canvas, new Vector3(p.x + f[0] * HUD_DISTANCE, p.y + f[1] * HUD_DISTANCE,
+        p.z + f[2] * HUD_DISTANCE));
     pie.canvas.SetRotation(q, false);
 }
 
@@ -741,16 +872,16 @@ function ToggleInfo(mode) {
 function PlaceInfo() {
     var s = HUD_WORLD_WIDTH / HUD_W;
     var width = INFO_W * s, height = info.height * s;
-    info.canvas.SetScale(new Vector3(s, s, s), false);
+    info.canvas.SetScale(new Vector3(s * VIEW_K, s * VIEW_K, s * VIEW_K), false);
     var q = Camera.GetRotation(false);
-    var p = Camera.GetPosition(false);
+    var p = CameraWorld();
     var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
     var right = -HUD_RIGHT_EDGE + panelOffset.info.x + width / 2;
     var up = HUD_TOP_EDGE + panelOffset.info.y - height / 2;
-    info.canvas.SetPosition(new Vector3(
-        p.x + f[0] * HUD_DISTANCE + r[0] * right + u[0] * up,
-        p.y + f[1] * HUD_DISTANCE + r[1] * right + u[1] * up,
-        p.z + f[2] * HUD_DISTANCE + r[2] * right + u[2] * up), false);
+    SetWorld(info.canvas, new Vector3(
+        p.x + f[0] * HUD_DISTANCE + (r[0] * right + u[0] * up) * VIEW_K,
+        p.y + f[1] * HUD_DISTANCE + (r[1] * right + u[1] * up) * VIEW_K,
+        p.z + f[2] * HUD_DISTANCE + (r[2] * right + u[2] * up) * VIEW_K));
     info.canvas.SetRotation(q, false);
 }
 
@@ -774,12 +905,18 @@ function InfoText() {
         lines.push("");
         lines.push("Latitude    " + Deg(site.lat, 5));
         lines.push("Longitude   " + Deg(site.lon, 5));
-        lines.push("Ground      " + (site.groundKm * 1000).toFixed(0) + (site.body === "Moon"
-            ? " m above the mean radius" : " m above sea level"));
+        lines.push("Ground      " + (site.terrain ? site.terrain.ground_m : site.groundKm * 1000).toFixed(0)
+            + (site.body === "Moon" ? " m above the mean radius" + (site.terrain ? " (LOLA)" : "") : " m above sea level"));
         lines.push("AGL         " + site.aglM.toFixed(1) + " m");
+        if (site.terrain) {
+            lines.push("");
+            lines = lines.concat(TerrainLines(site));
+        }
         if (site.link) {
             lines.push("");
-            lines.push("Frequency   " + site.freqMhz + " MHz");
+            for (var ri = 0; ri < site.radios.length; ri++) {
+                lines.push((ri === 0 ? "Radios      " : "            ") + RadioWords(site.radios[ri]));
+            }
             lines.push("Beam FOV    " + site.fovDeg + " deg (to " + (90 - site.fovDeg / 2).toFixed(1) + " deg elevation)");
             lines.push("Link        " + site.link);
             var inBeam = [];
@@ -971,12 +1108,12 @@ function UpdateAlign() {
     var fwd = [v[0], v[2], v[1]];                       // GMAT -> Unity axes
     var len = Math.sqrt(Dot3(fwd, fwd));
     fwd = [fwd[0] / len, fwd[1] / len, fwd[2] / len];
-    var p = focusEntity.GetPosition(false);
+    var p = GetWorld(focusEntity);
     var c = CraftBody(focusTag) === "Moon" && moonNow !== null ? moonNow.world : new Vector3(0, 0, 0);
     var up = [p.x - c.x, p.y - c.y, p.z - c.z];          // away from the body's centre
     // behind the spacecraft on the velocity line
-    Camera.SetPosition(new Vector3(p.x - fwd[0] * camDistance, p.y - fwd[1] * camDistance,
-        p.z - fwd[2] * camDistance), false);
+    SetCameraWorld(new Vector3(p.x - fwd[0] * camDistance, p.y - fwd[1] * camDistance,
+        p.z - fwd[2] * camDistance));
     Camera.SetRotation(LookRotation(fwd, up), false);
 }
 
@@ -1060,7 +1197,7 @@ function DesiredAttitude(tag, att, entity) {
         if (t === null) {
             return null;
         }
-        var p = entity.GetPosition(false);
+        var p = GetWorld(entity);
         primary = Unit3([t.x - p.x, t.z - p.z, t.y - p.y]);  // Unity -> GMAT axes
     }
     if (primary === null) {
@@ -1083,7 +1220,7 @@ function TargetPosition(target, selfTag) {
         return null;
     }
     var e = Entity.GetByTag(target.tag);
-    return e === null ? null : e.GetPosition(false);
+    return e === null ? null : GetWorld(e);
 }
 
 // Rotation (Unity axes) putting the boresight (local -X) along b and the arrays (local Y) as
@@ -1253,16 +1390,16 @@ function AttitudePanelTop() {
 
 function PlaceAttitudePanel() {
     var s = HUD_WORLD_WIDTH / HUD_W;
-    attPanel.canvas.SetScale(new Vector3(s, s, s), false);
+    attPanel.canvas.SetScale(new Vector3(s * VIEW_K, s * VIEW_K, s * VIEW_K), false);
     var q = Camera.GetRotation(false);
-    var p = Camera.GetPosition(false);
+    var p = CameraWorld();
     var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
     var right = -HUD_RIGHT_EDGE + panelOffset.att.x + INFO_W * s / 2;
     var up = AttitudePanelTop() + panelOffset.att.y - attPanel.height * s / 2;
-    attPanel.canvas.SetPosition(new Vector3(
-        p.x + f[0] * HUD_DISTANCE + r[0] * right + u[0] * up,
-        p.y + f[1] * HUD_DISTANCE + r[1] * right + u[1] * up,
-        p.z + f[2] * HUD_DISTANCE + r[2] * right + u[2] * up), false);
+    SetWorld(attPanel.canvas, new Vector3(
+        p.x + f[0] * HUD_DISTANCE + (r[0] * right + u[0] * up) * VIEW_K,
+        p.y + f[1] * HUD_DISTANCE + (r[1] * right + u[1] * up) * VIEW_K,
+        p.z + f[2] * HUD_DISTANCE + (r[2] * right + u[2] * up) * VIEW_K));
     attPanel.canvas.SetRotation(q, false);
 }
 
@@ -1279,7 +1416,7 @@ function UpdateAttitudePanel() {
 // Whether a click (view units) is on the info or attitude panel, so it does not pick a site.
 function OverLeftPanels(sx, sy) {
     var s = HUD_WORLD_WIDTH / HUD_W;
-    var x = sx * HUD_DISTANCE, y = sy * HUD_DISTANCE;
+    var x = sx * HUD_REF, y = sy * HUD_REF;
     var inside = function (off, top, height) {
         var left = -HUD_RIGHT_EDGE + off.x;
         return x >= left && x <= left + INFO_W * s && y <= top + off.y && y >= top + off.y - height;
@@ -1299,7 +1436,7 @@ function OverLeftPanels(sx, sy) {
 // the instrument's view is wider than the screen's). Show data again, Earth / Moon, R, the arrow
 // keys or another spacecraft leave it. The camera can't be dragged or zoomed meanwhile.
 const FRAME_ID = "b0e5a000-0000-4000-a000-000000000004";
-const FRAME_DISTANCE = 0.62;       // between the Assets panel (0.6) and the labels (0.65)
+const FRAME_DISTANCE = 0.37;       // between the panels (0.35) and the labels (0.40)
 const VIEW_HALF_FOV_DEG = 29.5;    // the camera's measured vertical field of view is ~59 deg
 var instrumentDefs = {};           // model file -> [ { name, pos, fwd, up, yfov_deg, aspect } ]
 var instrumentView = null;         // { tag, cam } while the view is on
@@ -1371,12 +1508,12 @@ function UpdateInstrumentView() {
     }
     var att = Attitude(instrumentView.tag);
     var q = { x: att.q[0], y: att.q[1], z: att.q[2], w: att.q[3] };
-    var p = e.GetPosition(false), sc = e.GetScale().x, c = instrumentView.cam;
+    var p = GetWorld(e), sc = e.GetScale().x, c = instrumentView.cam;
     var o = Rotate(q, c.pos[0] * sc, c.pos[1] * sc, c.pos[2] * sc);
     var f = Rotate(q, c.fwd[0], c.fwd[1], c.fwd[2]), u = Rotate(q, c.up[0], c.up[1], c.up[2]);
     var cam = new Vector3(p.x + o[0], p.y + o[1], p.z + o[2]);
     var rot = LookRotation(f, u);
-    Camera.SetPosition(cam, false);
+    SetCameraWorld(cam);
     Camera.SetRotation(rot, false);
     // the instrument's field of view, framed at FRAME_DISTANCE
     var halfH = Math.tan(c.yfov_deg * Math.PI / 360) * FRAME_DISTANCE;
@@ -1386,17 +1523,18 @@ function UpdateInstrumentView() {
     var fw = Rotate(cq, 0, 0, 1), up = Rotate(cq, 0, 1, 0);
     var frame = Entity.Get(FRAME_ID);
     if (frame !== null && fits) {
-        frame.SetPosition(new Vector3(cam.x + fw[0] * FRAME_DISTANCE, cam.y + fw[1] * FRAME_DISTANCE,
-            cam.z + fw[2] * FRAME_DISTANCE), false);
+        SetWorld(frame, new Vector3(cam.x + fw[0] * FRAME_DISTANCE, cam.y + fw[1] * FRAME_DISTANCE,
+            cam.z + fw[2] * FRAME_DISTANCE));
         frame.SetRotation(cq, false);
         frame.SetScale(new Vector3(halfH * (c.aspect || 1), halfH, halfH), false);
     }
     if (frameTag !== null) {
-        var s = HUD_WORLD_WIDTH / HUD_W;
-        var above = (fits ? halfH : HUD_TOP_EDGE) + 0.012;
+        var kf = FRAME_DISTANCE / HUD_REF;        // the caption's layout is in view units at HUD_REF
+        var s = HUD_WORLD_WIDTH / HUD_W * kf;
+        var above = fits ? halfH + 0.012 * kf : (HUD_TOP_EDGE + 0.012) * kf;
         frameTag.canvas.SetScale(new Vector3(s, s, s), false);
-        frameTag.canvas.SetPosition(new Vector3(cam.x + fw[0] * FRAME_DISTANCE + up[0] * above,
-            cam.y + fw[1] * FRAME_DISTANCE + up[1] * above, cam.z + fw[2] * FRAME_DISTANCE + up[2] * above), false);
+        SetWorld(frameTag.canvas, new Vector3(cam.x + fw[0] * FRAME_DISTANCE + up[0] * above,
+            cam.y + fw[1] * FRAME_DISTANCE + up[1] * above, cam.z + fw[2] * FRAME_DISTANCE + up[2] * above));
         frameTag.canvas.SetRotation(cq, false);
         frameTag.text.SetText("INSTRUMENT  " + c.name + " on " + (fleetNames[instrumentView.tag] || instrumentView.tag)
             + "   field of view " + c.yfov_deg.toFixed(1) + "°" + (fits ? " (frame)" : " (wider than this view)"));
@@ -1405,33 +1543,74 @@ function UpdateInstrumentView() {
 
 // ---- Link budgets (in Show info) ----
 // The equations of tools/linkbudget.py (free space, clear sky), worked out live from the current
-// range for every station / spacecraft pair in contact: the station's radio from
-// groundstations.xlsx (gain, noise temperature, Tx power), the spacecraft's from spacecraft.xlsx
-// (Payloads). Downlink: spacecraft EIRP, station G/T; uplink (2-way): station EIRP, spacecraft
-// G/T. Margin = Eb/N0 - the payload's required Eb/N0.
+// range, radio by radio: a station radio (groundstations, Station radios: gain, noise temperature,
+// Tx power) and a spacecraft radio (spacecraft.xlsx, Radios) make a link when their downlink
+// frequencies are in the same band. Downlink at the spacecraft radio's downlink frequency:
+// spacecraft EIRP, station G/T; uplink (2-way) at its uplink frequency: station EIRP, spacecraft
+// G/T. Margin = Eb/N0 - the radio's required Eb/N0.
 const LIGHT_SPEED = 299792458.0;
 const BOLTZMANN_DB = -228.6;
-var fleetPayloads = {};          // tag -> { tx_w, gain_dbi, rate_bps, ebn0_req_db, gt_dbk, up_rate_bps, losses_db }
+// IEEE letter bands (MHz, lower edge), as linkbudget.BANDS
+const BANDS = [[300, "UHF"], [1000, "L"], [2000, "S"], [4000, "C"], [8000, "X"], [12000, "Ku"], [18000, "K"],
+    [27000, "Ka"], [40000, "V"], [75000, "W"], [110000, "mm"]];
+var fleetRadios = {};            // tag -> [ { name, band, down_mhz, up_mhz, tx_w, gain_dbi, rate_bps, ... } ]
 
 function Log10(x) {
     return Math.log(x) / Math.LN10;
 }
 
-function LinkBudget(rangeKm, site, pl) {
-    var fspl = 20 * Log10(4 * Math.PI * rangeKm * 1e3 * site.freqMhz * 1e6 / LIGHT_SPEED);
-    var loss = fspl + (pl.losses_db || 0);
-    var out = { fspl: fspl, down: null, up: null };
-    var ok = function (v) { return v !== null && v !== undefined; };
-    if (ok(pl.tx_w) && ok(pl.gain_dbi) && ok(pl.rate_bps) && ok(pl.ebn0_req_db) && ok(site.gainDbi) && ok(site.tsysK)) {
-        var eirp = 10 * Log10(pl.tx_w) + pl.gain_dbi;
-        var gt = site.gainDbi - 10 * Log10(site.tsysK);
-        var ebn0 = eirp - loss + gt - BOLTZMANN_DB - 10 * Log10(pl.rate_bps);
-        out.down = { ebn0: ebn0, margin: ebn0 - pl.ebn0_req_db };
+function Have(v) {
+    return v !== null && v !== undefined;
+}
+
+function BandOf(mhz) {
+    if (!Have(mhz)) {
+        return null;
     }
-    if (site.link === "2-way" && ok(site.txW) && ok(site.gainDbi) && ok(pl.gt_dbk) && ok(pl.up_rate_bps) && ok(pl.ebn0_req_db)) {
-        var eirpUp = 10 * Log10(site.txW) + site.gainDbi;
-        var ebn0Up = eirpUp - loss + pl.gt_dbk - BOLTZMANN_DB - 10 * Log10(pl.up_rate_bps);
-        out.up = { ebn0: ebn0Up, margin: ebn0Up - pl.ebn0_req_db };
+    var name = "VHF";
+    for (var i = 0; i < BANDS.length; i++) {
+        if (mhz >= BANDS[i][0]) {
+            name = BANDS[i][1];
+        }
+    }
+    return name;
+}
+
+// [{ st, sc, band }]: every station radio / spacecraft radio pair in the same downlink band (a
+// spacecraft radio with no frequency -- the old Payloads sheet -- pairs with every station radio).
+function RadioPairs(stationRadios, craftRadios) {
+    var out = [];
+    for (var i = 0; i < stationRadios.length; i++) {
+        for (var k = 0; k < craftRadios.length; k++) {
+            var sr = stationRadios[i], cr = craftRadios[k];
+            var band = Have(cr.down_mhz) ? BandOf(cr.down_mhz) : BandOf(sr.down_mhz);
+            if (band !== null && band === BandOf(sr.down_mhz)) {
+                out.push({ st: sr, sc: cr, band: band });
+            }
+        }
+    }
+    return out;
+}
+
+function LinkBudget(rangeKm, st, sc, link) {
+    var losses = sc.losses_db || 0;
+    var out = { down: null, up: null };
+    var fDown = Have(sc.down_mhz) ? sc.down_mhz : st.down_mhz;
+    if (Have(fDown) && Have(sc.tx_w) && Have(sc.gain_dbi) && Have(sc.rate_bps) && Have(sc.ebn0_req_db)
+        && Have(st.gain_dbi) && Have(st.tsys_k)) {
+        var fspl = 20 * Log10(4 * Math.PI * rangeKm * 1e3 * fDown * 1e6 / LIGHT_SPEED);
+        var eirp = 10 * Log10(sc.tx_w) + sc.gain_dbi;
+        var gt = st.gain_dbi - 10 * Log10(st.tsys_k);
+        var ebn0 = eirp - fspl - losses + gt - BOLTZMANN_DB - 10 * Log10(sc.rate_bps);
+        out.down = { freq: fDown, fspl: fspl, ebn0: ebn0, margin: ebn0 - sc.ebn0_req_db };
+    }
+    var fUp = Have(sc.up_mhz) ? sc.up_mhz : (Have(st.up_mhz) ? st.up_mhz : fDown);
+    if (link === "2-way" && Have(fUp) && Have(st.tx_w) && Have(st.gain_dbi) && Have(sc.gt_dbk)
+        && Have(sc.up_rate_bps) && Have(sc.ebn0_req_db)) {
+        var fsplUp = 20 * Log10(4 * Math.PI * rangeKm * 1e3 * fUp * 1e6 / LIGHT_SPEED);
+        var eirpUp = 10 * Log10(st.tx_w) + st.gain_dbi;
+        var ebn0Up = eirpUp - fsplUp - losses + sc.gt_dbk - BOLTZMANN_DB - 10 * Log10(sc.up_rate_bps);
+        out.up = { freq: fUp, fspl: fsplUp, ebn0: ebn0Up, margin: ebn0Up - sc.ebn0_req_db };
     }
     return out;
 }
@@ -1440,32 +1619,55 @@ function Signed(x) {
     return (x >= 0 ? "+" : "") + x.toFixed(1);
 }
 
-// Lines for one station / spacecraft pair in contact (label = the other end's name).
+function Rate(bps) {
+    return bps >= 1e6 ? (bps / 1e6).toFixed(2) + " Mbps" : (bps / 1000).toFixed(1) + " kbps";
+}
+
+// "S-band 2250 / up 2050 MHz" for a radio
+function RadioWords(r) {
+    return r.name + " " + r.down_mhz + (Have(r.up_mhz) ? " / up " + r.up_mhz : "") + " MHz";
+}
+
+// Lines for one station / spacecraft pair in contact (label = the other end's name): a budget
+// for every radio pair in a shared band.
 function BudgetLines(site, tag, label) {
     var craft = Entity.GetByTag(tag);
     if (craft === null) {
         return [];
     }
-    var q = craft.GetPosition(false), p = site.trueWorld;
+    var q = GetWorld(craft), p = site.trueWorld;
     var rangeKm = Math.sqrt((q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y) + (q.z - p.z) * (q.z - p.z))
         / KM_TO_WORLD_UNITS;
-    var head = label + "   range " + rangeKm.toFixed(0) + " km";
-    var pl = fleetPayloads[tag];
-    if (!pl) {
-        return [head, "   no radio for " + (fleetNames[tag] || tag) + " (spacecraft.xlsx, sheet Payloads)"];
+    var lines = [label + "   range " + rangeKm.toFixed(0) + " km"];
+    var craftRadios = fleetRadios[tag] || [];
+    if (craftRadios.length === 0) {
+        return lines.concat(["   no radio for " + (fleetNames[tag] || tag) + " (spacecraft.xlsx, sheet Radios)"]);
     }
-    if (site.gainDbi === null || site.gainDbi === undefined || site.tsysK === null || site.tsysK === undefined) {
-        return [head, "   no radio for " + site.name + " (antenna gain, noise temp: columns J-K)"];
+    var found = RadioPairs(site.radios, craftRadios);
+    if (found.length === 0) {
+        var bands = function (rs) {
+            var b = [];
+            for (var i = 0; i < rs.length; i++) {
+                b.push(rs[i].band || "?");
+            }
+            return b.join(", ");
+        };
+        return lines.concat(["   no shared band (station: " + bands(site.radios) + "; spacecraft: " + bands(craftRadios) + ")"]);
     }
-    var b = LinkBudget(rangeKm, site, pl);
-    var lines = [head + "   path loss " + b.fspl.toFixed(1) + " dB"];
-    if (b.down !== null) {
-        lines.push("   down " + (pl.rate_bps / 1000).toFixed(1) + " kbps: Eb/N0 " + b.down.ebn0.toFixed(1)
-            + " dB, margin " + Signed(b.down.margin) + " dB" + (b.down.margin < 0 ? "  NOT CLOSING" : ""));
-    }
-    if (b.up !== null) {
-        lines.push("   up " + (pl.up_rate_bps / 1000).toFixed(1) + " kbps: Eb/N0 " + b.up.ebn0.toFixed(1)
-            + " dB, margin " + Signed(b.up.margin) + " dB" + (b.up.margin < 0 ? "  NOT CLOSING" : ""));
+    for (var k = 0; k < found.length; k++) {
+        var pr = found[k];
+        var b = LinkBudget(rangeKm, pr.st, pr.sc, site.link);
+        lines.push("   " + pr.band + "-band  " + pr.sc.name + " <> " + pr.st.name);
+        if (b.down !== null) {
+            lines.push("      down " + b.down.freq + " MHz " + Rate(pr.sc.rate_bps) + ": Eb/N0 " + b.down.ebn0.toFixed(1)
+                + " dB, margin " + Signed(b.down.margin) + " dB" + (b.down.margin < 0 ? "  NOT CLOSING" : ""));
+        } else {
+            lines.push("      down: missing values (station gain / noise temp, or the radio's power, gain, rate)");
+        }
+        if (b.up !== null) {
+            lines.push("      up " + b.up.freq + " MHz " + Rate(pr.sc.up_rate_bps) + ": Eb/N0 " + b.up.ebn0.toFixed(1)
+                + " dB, margin " + Signed(b.up.margin) + " dB" + (b.up.margin < 0 ? "  NOT CLOSING" : ""));
+        }
     }
     return lines;
 }
@@ -1494,89 +1696,222 @@ function BudgetSection(site, tag) {
     return lines;
 }
 
+// ---- Lunar terrain (tools/terrain.py) ----
+// fleet.json "terrain": per Moon site its horizon mask (the terrain's elevation every az_step
+// deg from north through east, from LOLA), the Sun's disc in view and the Earth's clearance over
+// the window (60 s samples), and the next 30 / 365 days' figures. The mask also gates link
+// lines, as the fleet job's passes are gated.
+var fleetTerrain = {};           // site name -> results
+var fleetTerrainCharts = {};     // site name -> "data/charts/terrain-<name>.png"
+
+// A site's key in fleet.json's per-site results: a place and a station may share a name.
+function SiteKey(site) {
+    return (site.layer === "stations" ? "station:" : "place:") + site.name;
+}
+
+// The mask at an azimuth (deg), linear between its samples.
+function HorizonAt(terrain, az) {
+    var m = terrain.mask, n = m.length;
+    var x = (((az % 360) + 360) % 360) / terrain.az_step;
+    var i = Math.floor(x), f = x - i;
+    return m[i % n] * (1 - f) + m[(i + 1) % n] * f;
+}
+
+// The window sample nearest now.
+function TerrainNow(terrain) {
+    var w = terrain.window;
+    var i = Math.round((elapsedSeconds - w.t0) / w.step);
+    i = Math.max(0, Math.min(w.sun.length - 1, i));
+    return { sun: w.sun[i], sunEl: w.sun_el[i], earthClear: w.earth_clear[i] };
+}
+
+function Hours(h) {
+    return h >= 48 ? (h / 24).toFixed(1) + " d" : h.toFixed(1) + " h";
+}
+
+function TerrainLines(site) {
+    var tr = site.terrain, lines = [];
+    var now = TerrainNow(tr);
+    lines.push("Sunlight    " + (100 * now.sun).toFixed(0) + "% of the Sun's disc in view (Sun "
+        + now.sunEl.toFixed(2) + "\u00b0 up)");
+    lines.push("Earth       " + (now.earthClear > 0 ? "in sight, " + now.earthClear.toFixed(2) + "\u00b0 above the terrain"
+        : "hidden, " + (-now.earthClear).toFixed(2) + "\u00b0 below the terrain"));
+    var spans = [["next_30d", "Next 30 d "], ["next_365d", "Next 365 d"]];
+    for (var k = 0; k < spans.length; k++) {
+        var st = tr[spans[k][0]];
+        lines.push(spans[k][1] + "  Sun " + st.sunlit_pct.toFixed(1) + "% (longest without " + Hours(st.longest_dark_h)
+            + "), Earth " + st.earth_pct.toFixed(1) + "%");
+    }
+    lines.push("Terrain     LOLA " + tr.dem.split("_")[1] + " px/deg, horizon " + Math.min.apply(null, tr.mask).toFixed(1)
+        + " to " + Math.max.apply(null, tr.mask).toFixed(1) + "\u00b0");
+    return lines;
+}
+
+// ---- Panels with pictures ----
+// The chart and plot panels show matplotlib PNGs. WebVerse's own picture loader (ImageEntity,
+// and button / dropdown images) fails in this runtime once a world has been unloaded -- its
+// helper's instance is cleared on unload and never set again (EntityAPIHelper.ClearEntityMapping),
+// so every load throws before downloading -- and WebVerse always opens its home world first.
+// Models still load, so each picture comes as a .glb beside its PNG (tools/charts.py
+// picture_glb: a unit quad textured with it, unlit, blended so it casts no shadow), placed on its
+// panel every frame, turned with the camera and a hair nearer than the panel. Pictures that load
+// after their panel closed are removed when they arrive.
+const PX_UNITS = HUD_W / (HUD_WORLD_WIDTH * 1459);  // canvas units per view pixel (at the calibration)
+const PICTURE_LIFT = 0.002;      // world units nearer the camera than the panel
+var pictureSerial = 0;
+var doomedPictures = [];         // ids of pictures whose panel closed while they were loading
+
+function NewPanel(tagName, w, h) {
+    var canvas = CanvasEntity.Create(null, new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+        new Vector3(1, 1, 1), false, null, tagName);
+    canvas.SetVisibility(true);
+    canvas.MakeWorldCanvas();
+    canvas.SetSize(new Vector2(w, h));
+    return { canvas: canvas, parts: [], pictures: [], w: w, height: h };
+}
+
+// A picture (models' .glb path under DATA_BASE_URL) at x, y, w, h canvas units from the panel's
+// top-left corner.
+function PanelPicture(panel, glb, x, y, w, h) {
+    pictureSerial++;
+    var id = "b0e5a0f0-0000-4000-a000-" + ("000000000000" + pictureSerial.toString(16)).slice(-12);
+    var url = DATA_BASE_URL + glb;
+    MeshEntity.Create(null, url, [url], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1), id, "OnPanelPictureLoaded");
+    panel.pictures.push({ id: id, x: x, y: y, w: w, h: h, shown: false });
+}
+
+function OnPanelPictureLoaded(entity) {
+    // placed (and shown) by PlacePanel on the next frame; nothing to do here
+}
+
+// Put a panel's canvas and its pictures in front of the camera: right / up = the panel's centre
+// in view units at HUD_REF.
+function PlacePanel(panel, right, up) {
+    var s = HUD_WORLD_WIDTH / HUD_W;
+    var q = Camera.GetRotation(false);
+    var p = CameraWorld();
+    var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
+    var at = function (dx, dy, lift) {
+        return new Vector3(
+            p.x + f[0] * (HUD_DISTANCE - lift) + (r[0] * dx + u[0] * dy) * VIEW_K,
+            p.y + f[1] * (HUD_DISTANCE - lift) + (r[1] * dx + u[1] * dy) * VIEW_K,
+            p.z + f[2] * (HUD_DISTANCE - lift) + (r[2] * dx + u[2] * dy) * VIEW_K);
+    };
+    panel.canvas.SetScale(new Vector3(s * VIEW_K, s * VIEW_K, s * VIEW_K), false);
+    SetWorld(panel.canvas, at(right, up, 0));
+    panel.canvas.SetRotation(q, false);
+    for (var i = 0; i < panel.pictures.length; i++) {
+        var pic = panel.pictures[i];
+        var e = Entity.Get(pic.id);
+        if (e === null) {
+            continue;                     // still loading
+        }
+        var dx = right + (pic.x + pic.w / 2 - panel.w / 2) * s;
+        var dy = up + (panel.height / 2 - pic.y - pic.h / 2) * s;
+        SetWorld(e, at(dx, dy, PICTURE_LIFT));
+        e.SetRotation(q, false);
+        e.SetScale(new Vector3(pic.w * s * VIEW_K, pic.h * s * VIEW_K, 1), false);
+        if (!pic.shown) {
+            e.SetVisibility(true);
+            pic.shown = true;
+        }
+    }
+}
+
+function DeletePanel(panel) {
+    for (var i = 0; i < panel.parts.length; i++) {
+        panel.parts[i].Delete();
+    }
+    panel.canvas.Delete();
+    for (var k = 0; k < panel.pictures.length; k++) {
+        var e = Entity.Get(panel.pictures[k].id);
+        if (e !== null) {
+            e.Delete();
+        } else {
+            doomedPictures.push(panel.pictures[k].id);
+        }
+    }
+}
+
+function SweepPictures() {
+    for (var i = doomedPictures.length - 1; i >= 0; i--) {
+        var e = Entity.Get(doomedPictures[i]);
+        if (e !== null) {
+            e.Delete();
+            doomedPictures.splice(i, 1);
+        }
+    }
+}
+
+function PictureGlb(png) {
+    return png.replace(/\.png$/, ".glb");
+}
+
 // ---- Chart panel (with Show info) ----
-// While Show info is open on a ground station, its chart (tools/charts.py: contacts, elevation
-// and downlink margin per pass, a PNG from the fleet job, fleet.json "charts") shows in a panel
-// at the bottom right. An ImageEntity's picture is fixed when it is created, so the panel is
-// rebuilt when the station changes. "::" grip to move it, like the other panels.
-const CHART_W = 640;             // canvas units = the PNG's pixels
-const CHART_H = 780;
+// While Show info is open on a ground station or a Moon site, its chart (tools/charts.py: a
+// station's contacts, elevation and margin per pass; a Moon site's terrain chart) shows in a
+// panel along the bottom, left of the Assets panel. A Moon ground station has both, with a
+// Passes / Terrain switch. "::" grip to move it, like the other panels.
+const CHART_W = Math.round(460 * PX_UNITS);   // the chart's 4.6 x 5.6 in at 100 px per inch
+const CHART_H = Math.round(560 * PX_UNITS);
 const CHART_HEAD = 50;           // the grip row above the picture
-const CHART_BOTTOM = -0.30;      // view units at HUD_DISTANCE: the panel's home bottom edge
+const CHART_BOTTOM = -0.335;     // view units at HUD_REF: the panel's home bottom edge
+const CHART_RIGHT = HUD_RIGHT_EDGE - HUD_WORLD_WIDTH - 0.01;   // home right edge: left of the Assets panel
 var fleetCharts = {};            // station name -> "data/charts/<name>.png"
-var chartPanel = null;           // { canvas, parts, grip, file, height }
+var chartPanel = null;           // { canvas, parts, pictures, grip, file, w, height, status }
+var chartTab = "passes";         // a Moon ground station has both: "passes" or "terrain"
+
+function ChartTab(tab) {
+    chartTab = tab;
+}
 
 function UpdateChartPanel() {
     var want = null;
-    if (infoOn && siteView !== null && siteView.site.link) {
-        want = fleetCharts[siteView.site.name] || null;
+    if (infoOn && siteView !== null) {
+        var name = siteView.site.name;
+        var passes = siteView.site.link ? (fleetCharts[name] || null) : null;
+        var land = fleetTerrainCharts[SiteKey(siteView.site)] || null;
+        want = passes !== null && land !== null ? (chartTab === "terrain" ? land : passes) : (passes || land);
     }
     if (chartPanel !== null && chartPanel.file !== want) {
-        for (var i = 0; i < chartPanel.parts.length; i++) {
-            try {
-                chartPanel.parts[i].Delete();
-            } catch (e) {
-                // a picture still loading: deleting the canvas below removes it
-            }
-        }
-        chartPanel.canvas.Delete();
+        DeletePanel(chartPanel);
         chartPanel = null;
     }
     if (chartPanel === null && want !== null) {
         CreateChartPanel(want);
     }
     if (chartPanel !== null) {
-        PlaceChartPanel();
+        var s = HUD_WORLD_WIDTH / HUD_W;
+        PlacePanel(chartPanel, CHART_RIGHT + panelOffset.chart.x - CHART_W * s / 2,
+            CHART_BOTTOM + panelOffset.chart.y + chartPanel.height * s / 2);
     }
 }
 
 function CreateChartPanel(file) {
-    var canvas = CanvasEntity.Create(null, new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
-        new Vector3(1, 1, 1), false, null, "chart-panel");
-    canvas.SetVisibility(true);
-    canvas.MakeWorldCanvas();
     var height = CHART_HEAD + CHART_H;
-    canvas.SetSize(new Vector2(CHART_W, height));
-    chartPanel = { canvas: canvas, parts: [], file: file, height: height };
+    chartPanel = NewPanel("chart-panel", CHART_W, height);
+    var canvas = chartPanel.canvas;
+    chartPanel.file = file;
     var head = CHART_HEAD / height;
     chartPanel.parts.push(MakeRowButton(canvas, "", 0, 0, 1, 1, PANEL_COLOR));
-    chartPanel.grip = MakeText(canvas, "::", 0.01, 0, 0.1, head, panelMove === "chart" ? GRIP_ARMED : GRIP_COLOR, INFO_FONT);
+    chartPanel.grip = MakeText(canvas, "::", 0.01, 0, 0.06, head, panelMove === "chart" ? GRIP_ARMED : GRIP_COLOR, INFO_FONT);
     chartPanel.parts.push(chartPanel.grip);
-    chartPanel.parts.push(MakeRowButton(canvas, "StartMove('chart');", 0.01, 0, 0.1, head, ROW_COLOR));
-    // the picture loads asynchronously; it is made visible when it has (OnChartImageLoaded)
-    var image = ImageEntity.Create(canvas, DATA_BASE_URL + file, new Vector2(0, head), new Vector2(1, 1 - head),
-        null, null, "OnChartImageLoaded");
-    if (image !== null) {
-        chartPanel.parts.push(image);
+    chartPanel.parts.push(MakeRowButton(canvas, "StartMove('chart');", 0.01, 0, 0.06, head, ROW_COLOR));
+    var name = siteView !== null ? siteView.site.name : "";
+    var both = siteView !== null && siteView.site.link && fleetCharts[name] && fleetTerrainCharts[SiteKey(siteView.site)];
+    if (both) {
+        var tabs = [["passes", "Passes"], ["terrain", "Terrain"]];
+        for (var k = 0; k < tabs.length; k++) {
+            var x = 0.09 + k * 0.17;
+            chartPanel.parts.push(MakeText(canvas, tabs[k][1], x, 0, 0.16, head, new Color(1, 1, 1, 1), INFO_FONT));
+            chartPanel.parts.push(MakeRowButton(canvas, "ChartTab('" + tabs[k][0] + "');", x, 0, 0.16, head,
+                chartTab === tabs[k][0] ? ROW_SELECTED : ROW_COLOR));
+        }
     }
-    PlaceChartPanel();
+    PanelPicture(chartPanel, PictureGlb(file), 0, CHART_HEAD, CHART_W, CHART_H);
+    // the status text starts after the Passes / Terrain switch when there is one
+    AddSaveButton(chartPanel, "chart", both ? 0.45 : 0.09);
     Report("chart: " + file);
-}
-
-function OnChartImageLoaded(image) {
-    if (image !== null) {
-        image.SetVisibility(true);
-    }
-}
-
-function ChartPanelTop() {
-    var s = HUD_WORLD_WIDTH / HUD_W;
-    return CHART_BOTTOM + chartPanel.height * s;
-}
-
-function PlaceChartPanel() {
-    var s = HUD_WORLD_WIDTH / HUD_W;
-    chartPanel.canvas.SetScale(new Vector3(s, s, s), false);
-    var q = Camera.GetRotation(false);
-    var p = Camera.GetPosition(false);
-    var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
-    var right = HUD_RIGHT_EDGE + panelOffset.chart.x - CHART_W * s / 2;
-    var up = CHART_BOTTOM + panelOffset.chart.y + chartPanel.height * s / 2;
-    chartPanel.canvas.SetPosition(new Vector3(
-        p.x + f[0] * HUD_DISTANCE + r[0] * right + u[0] * up,
-        p.y + f[1] * HUD_DISTANCE + r[1] * right + u[1] * up,
-        p.z + f[2] * HUD_DISTANCE + r[2] * right + u[2] * up), false);
-    chartPanel.canvas.SetRotation(q, false);
 }
 
 function OverChartPanel(sx, sy) {
@@ -1584,8 +1919,237 @@ function OverChartPanel(sx, sy) {
         return false;
     }
     var s = HUD_WORLD_WIDTH / HUD_W;
-    var x = sx * HUD_DISTANCE - panelOffset.chart.x, y = sy * HUD_DISTANCE - panelOffset.chart.y;
-    return x <= HUD_RIGHT_EDGE && x >= HUD_RIGHT_EDGE - CHART_W * s && y >= CHART_BOTTOM && y <= ChartPanelTop();
+    var x = sx * HUD_REF - panelOffset.chart.x, y = sy * HUD_REF - panelOffset.chart.y;
+    return x <= CHART_RIGHT && x >= CHART_RIGHT - CHART_W * s && y >= CHART_BOTTOM
+        && y <= CHART_BOTTOM + chartPanel.height * s;
+}
+
+// ---- Plot panel (under the info panel) ----
+// With Show info open on a Moon site, a ground station or a spacecraft, its XY plot of the Sun,
+// direct-to-Earth and link times over the run's window (tools/charts.py timeline_chart, fleet.json
+// "timelines") hangs under the info panel and moves with it ("::" grip to move it on its own).
+const PLOT_W = Math.round(500 * PX_UNITS);    // the plot's 5.0 x 4.0 in at 100 px per inch
+const PLOT_H = Math.round(400 * PX_UNITS);
+const PLOT_GAP = 0.004;          // view units between the info panel and the plot panel
+var fleetTimelines = {};         // site name or "craft:<tag>" -> "data/charts/timeline-<name>.png"
+var plotPanel = null;            // { canvas, parts, pictures, grip, file, w, height, status }
+
+// The span (box next to the save icon): 13 h is the fleet run's own plot (fleet.json
+// "timelines"); the longer ones are drawn on request by the local server (/api/plot,
+// tools/plots.py) and kept per site and span until the next fleet run. While one is being
+// drawn, the panel keeps the plot it shows and says so.
+const PLOT_SPANS = [["window", "13 h"], ["week", "Week"], ["month", "Month"], ["6mo", "6 mo"], ["year", "Year"]];
+var plotSpan = "window";
+var plotSpanOpen = false;          // the span list is showing in the panel's head row
+var spanFiles = {};                // "<key>|<span>" -> "data/charts/span-....png"
+var spanPending = null;            // the "<key>|<span>" being drawn by the server
+var spanFailed = {};               // "<key>|<span>" -> why it failed
+var spanRetryAt = {};              // "<key>|<span>" -> the frame to ask again (the server is working on it)
+const SPAN_RETRY_FRAMES = 120;     // ~2 s
+
+function PlotKey() {
+    if (!infoOn || infoMode !== "info" || info === null) {
+        return null;
+    }
+    if (siteView !== null) {
+        return SiteKey(siteView.site);
+    }
+    return focusTag !== "Earth" && focusTag !== "Moon" ? "craft:" + focusTag : null;
+}
+
+function SpanName(span) {
+    for (var i = 0; i < PLOT_SPANS.length; i++) {
+        if (PLOT_SPANS[i][0] === span) {
+            return PLOT_SPANS[i][1];
+        }
+    }
+    return span;
+}
+
+function ToggleSpanList() {
+    plotSpanOpen = !plotSpanOpen;
+    ShowSpanList();
+}
+
+function ShowSpanList() {
+    if (plotPanel === null) {
+        return;
+    }
+    for (var i = 0; i < plotPanel.spanParts.length; i++) {
+        plotPanel.spanParts[i].SetVisibility(plotSpanOpen);
+    }
+    plotPanel.status.SetVisibility(!plotSpanOpen);
+}
+
+function ChooseSpan(span) {
+    plotSpan = span;
+    plotSpanOpen = false;
+    ShowSpanList();
+    Report("plot span: " + span);
+}
+
+function OnSpanPlot(body) {
+    var done = spanPending;
+    spanPending = null;
+    var result = null;
+    try {
+        result = JSON.parse(body);
+    } catch (e) {
+    }
+    if (result !== null && result.ok) {
+        spanFiles[done] = result.file;
+    } else if (result !== null && result.pending) {
+        spanRetryAt[done] = infoFrame + SPAN_RETRY_FRAMES;   // being drawn: ask again shortly
+    } else {
+        spanFailed[done] = result !== null ? result.error : "no answer (is tools/serve.py running, and restarted?)";
+        Report("plot " + done + " failed: " + spanFailed[done]);
+    }
+}
+
+function UpdatePlotPanel() {
+    SweepPictures();
+    var key = PlotKey();
+    var want = null, waiting = null;
+    if (key !== null && fleetTimelines[key]) {
+        if (plotSpan === "window") {
+            want = fleetTimelines[key];
+        } else {
+            var k = key + "|" + plotSpan;
+            if (spanFiles[k]) {
+                want = spanFiles[k];
+            } else {
+                // keep what is showing for this site meanwhile; ask the server once
+                want = plotPanel !== null && plotPanel.key === key ? plotPanel.file : fleetTimelines[key];
+                if (spanFailed[k]) {
+                    waiting = SpanName(plotSpan) + ": " + spanFailed[k];
+                } else {
+                    // the first plot of a span may need a GMAT propagation (tools/longrun.py)
+                    waiting = "Drawing " + SpanName(plotSpan).toLowerCase() + "... (GMAT, first time "
+                        + (plotSpan === "6mo" || plotSpan === "year" ? "~2.5 min" : "~30 s") + ")";
+                    if (spanPending === null && infoFrame >= (spanRetryAt[k] || 0)) {
+                        spanPending = k;
+                        HTTPNetworking.Fetch(DATA_BASE_URL + "api/plot?key=" + encodeURIComponent(key) + "&span="
+                            + plotSpan, "OnSpanPlot");
+                    }
+                }
+            }
+        }
+    }
+    if (plotPanel !== null && plotPanel.file !== want) {
+        DeletePanel(plotPanel);
+        plotPanel = null;
+    }
+    if (plotPanel === null && want !== null) {
+        CreatePlotPanel(want);
+        plotPanel.key = key;
+    }
+    if (plotPanel !== null) {
+        var note = waiting !== null ? waiting : "";
+        if (note !== plotPanel.note) {           // (a "Saved ..." message stays until this changes)
+            plotPanel.status.SetText(note);
+            plotPanel.note = note;
+        }
+        var s = HUD_WORLD_WIDTH / HUD_W;
+        PlacePanel(plotPanel, -HUD_RIGHT_EDGE + panelOffset.info.x + panelOffset.plot.x + PLOT_W * s / 2,
+            PlotPanelTop() + panelOffset.plot.y - plotPanel.height * s / 2);
+    }
+}
+
+function CreatePlotPanel(file) {
+    var height = CHART_HEAD + PLOT_H;
+    plotPanel = NewPanel("plot-panel", PLOT_W, height);
+    var canvas = plotPanel.canvas;
+    plotPanel.file = file;
+    var head = CHART_HEAD / height;
+    plotPanel.parts.push(MakeRowButton(canvas, "", 0, 0, 1, 1, PANEL_COLOR));
+    plotPanel.grip = MakeText(canvas, "::", 0.01, 0, 0.06, head, panelMove === "plot" ? GRIP_ARMED : GRIP_COLOR, INFO_FONT);
+    plotPanel.parts.push(plotPanel.grip);
+    plotPanel.parts.push(MakeRowButton(canvas, "StartMove('plot');", 0.01, 0, 0.06, head, ROW_COLOR));
+    PanelPicture(plotPanel, PictureGlb(file), 0, CHART_HEAD, PLOT_W, PLOT_H);
+    // the span box, left of the save icon, and its list (hidden until the box is clicked)
+    var boxW = 0.11, boxX = 1 - (50 + 10) / PLOT_W - boxW - 0.01;
+    AddSaveButton(plotPanel, "plot", 0.09, boxX - 0.01);
+    plotPanel.note = "";
+    plotPanel.parts.push(MakeText(canvas, SpanName(plotSpan) + " v", boxX, 0, boxW, head, new Color(1, 1, 1, 1), 24));
+    plotPanel.parts.push(MakeRowButton(canvas, "ToggleSpanList();", boxX, 0, boxW, head, ROW_SELECTED));
+    plotPanel.spanParts = [];
+    var optW = 0.105, optX = boxX - PLOT_SPANS.length * optW - 0.01;
+    for (var i = 0; i < PLOT_SPANS.length; i++) {
+        var x = optX + i * optW;
+        var t = MakeText(canvas, PLOT_SPANS[i][1], x, 0, optW - 0.005, head,
+            PLOT_SPANS[i][0] === plotSpan ? new Color(1, 0.85, 0.3, 1) : new Color(1, 1, 1, 1), 24);
+        var b = MakeRowButton(canvas, "ChooseSpan('" + PLOT_SPANS[i][0] + "');", x, 0, optW - 0.005, head, ROW_COLOR);
+        plotPanel.parts.push(t);
+        plotPanel.parts.push(b);
+        plotPanel.spanParts.push(t);
+        plotPanel.spanParts.push(b);
+    }
+    ShowSpanList();
+    Report("plot: " + file);
+}
+
+// Top edge (view units at HUD_REF, before the panel's own offset): just under the info panel.
+function PlotPanelTop() {
+    var s = HUD_WORLD_WIDTH / HUD_W;
+    return HUD_TOP_EDGE + panelOffset.info.y - info.height * s - PLOT_GAP;
+}
+
+function OverPlotPanel(sx, sy) {
+    if (plotPanel === null || info === null) {
+        return false;
+    }
+    var s = HUD_WORLD_WIDTH / HUD_W;
+    var x = sx * HUD_REF, y = sy * HUD_REF;
+    var left = -HUD_RIGHT_EDGE + panelOffset.info.x + panelOffset.plot.x;
+    var top = PlotPanelTop() + panelOffset.plot.y;
+    return x >= left && x <= left + PLOT_W * s && y <= top && y >= top - plotPanel.height * s;
+}
+
+// ---- Saving plots ----
+// The save icon (a picture, models/save_icon.glb) on the plot and chart panels: the local
+// server (tools/serve.py, /api/save) copies the shown PNG and the SVG beside it into exports/
+// with the time saved; the panel's head row says where they went.
+const SAVE_ICON_GLB = "models/save_icon.glb";
+var saveFrom = null;             // "plot" or "chart" while a save is on its way
+
+function AddSaveButton(panel, key, left, right) {
+    var size = 40, pad = 5;
+    var x = panel.w - size - 2 * pad;
+    PanelPicture(panel, SAVE_ICON_GLB, x + pad, pad, size, size);
+    panel.parts.push(MakeRowButton(panel.canvas, "SavePlot('" + key + "');", x / panel.w, 0, (size + 2 * pad) / panel.w,
+        CHART_HEAD / panel.height, ROW_COLOR));
+    var end = right !== undefined ? right : x / panel.w - 0.01;     // the status text's right edge
+    panel.status = MakeText(panel.canvas, "", left, 0, end - left, CHART_HEAD / panel.height,
+        new Color(0.6, 1, 0.75, 1), 22);
+    panel.parts.push(panel.status);
+}
+
+function SavePlot(key) {
+    var panel = key === "plot" ? plotPanel : chartPanel;
+    if (panel === null || saveFrom !== null) {
+        return;
+    }
+    saveFrom = key;
+    panel.status.SetText("Saving...");
+    HTTPNetworking.Fetch(DATA_BASE_URL + "api/save?file=" + panel.file, "OnPlotSaved");
+    Report("save: " + panel.file);
+}
+
+function OnPlotSaved(body) {
+    var panel = saveFrom === "plot" ? plotPanel : chartPanel;
+    saveFrom = null;
+    var result = null;
+    try {
+        result = JSON.parse(body);
+    } catch (e) {
+    }
+    var words = result !== null && result.ok && result.saved.length > 0
+        ? "Saved " + result.saved[0].replace(".png", "") + " (.png, .svg)"
+        : "Save failed (is tools/serve.py running?)";
+    if (panel !== null) {
+        panel.status.SetText(words);
+    }
+    Report("save: " + words);
 }
 
 // ---- Passes (in Show info) ----
@@ -1616,7 +2180,8 @@ function PassLines(by, key, max) {
         var q = list[k];
         var who = by === "craft" ? q.name : (by === "station" ? q.station : q.name + " / " + q.station);
         var dur = q.los - q.aos;
-        var now = q.aos <= elapsedSeconds ? "   NOW" : "";
+        var now = (q.aos_by === "terrain" || q.los_by === "terrain" ? "   terrain" : "")
+            + (q.aos <= elapsedSeconds ? "   NOW" : "");
         lines.push(who + "   " + UtcString(q.aos).slice(12, 20) + " - " + UtcString(q.los).slice(12, 20)
             + "   " + Math.floor(dur / 60) + "m" + ("0" + Math.round(dur % 60)).slice(-2) + "s   "
             + q.max_el.toFixed(1) + "\u00b0" + now);
@@ -1674,7 +2239,7 @@ function CreateOrbitLines(tracks) {
             var id = NextOrbitId();
             var url = DATA_BASE_URL + segs[k].file;
             orbitSegments[tag].push({ id: id, t: segs[k].t, moon: tracks[tag].origin === "Moon" });
-            MeshEntity.Create(null, url, [url], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+            MeshEntity.Create(null, url, [url], ToUnity(new Vector3(0, 0, 0)), new Quaternion(0, 0, 0, 1),
                 id, "OnOrbitLineLoaded");
         }
     }
@@ -1718,7 +2283,7 @@ function UpdateOrbitLines() {
         if (shown && shown.moon && moonNow !== null) {
             var line = Entity.Get(shown.id);
             if (line !== null) {
-                line.SetPosition(moonNow.world, false);
+                SetWorld(line, moonNow.world);
             }
         }
     }
@@ -1823,9 +2388,9 @@ const LABEL_RAISE_PER_DISTANCE = 0.03;   // gap above the spacecraft, same units
 // "above" meaning up on screen (the camera's up axis), so the two never overlap: the label's
 // near edge is this far from the dot's edge (fraction of camera distance).
 const SITE_LABEL_GAP_PER_DISTANCE = 0.004;
-// Labels are drawn this far from the camera (see UpdateLabels): just behind the Assets panel
-// (HUD_DISTANCE 0.6), so they never cover it, and in front of everything else.
-const LABEL_DRAW_DISTANCE = 0.65;
+// Labels are drawn this far from the camera (see UpdateLabels): just behind the panels
+// (HUD_DISTANCE 0.35), so they never cover them, and in front of everything else.
+const LABEL_DRAW_DISTANCE = 0.40;
 var labels = {};                // key -> { canvas, text, site, lines }: a spacecraft tag, or "site-<id>"
 var pendingLabel = null;        // onLoaded callbacks fire synchronously inside Create()
 
@@ -1864,7 +2429,7 @@ function OnLabelTextLoaded(text) {
 }
 
 function UpdateLabels() {
-    var cam = Camera.GetPosition(false);
+    var cam = CameraWorld();
     var camRot = Camera.GetRotation(false);
     var up = Rotate(camRot, 0, 1, 0);          // screen up, in world space
     for (var tag in labels) {
@@ -1876,7 +2441,7 @@ function UpdateLabels() {
             if (entity === null) {
                 continue;
             }
-            p = entity.GetPosition(false);
+            p = GetWorld(entity);
         }
         var dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z;
         var dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
@@ -1907,7 +2472,7 @@ function UpdateLabels() {
         // atmosphere shells, which used to cut through labels near the surface.
         var ex = lx - cam.x, ey = ly - cam.y, ez = lz - cam.z;
         var k = LABEL_DRAW_DISTANCE / Math.sqrt(ex * ex + ey * ey + ez * ez);
-        canvas.SetPosition(new Vector3(cam.x + ex * k, cam.y + ey * k, cam.z + ez * k), false);
+        SetWorld(canvas, new Vector3(cam.x + ex * k, cam.y + ey * k, cam.z + ez * k));
         canvas.SetRotation(camRot, false);
         canvas.SetScale(new Vector3(scale * k, scale * k, scale * k), false);
     }
@@ -1915,15 +2480,28 @@ function UpdateLabels() {
 
 
 // ---- The Moon ----
-// models/moon.glb: a unit sphere with NASA's LRO LROC colour map, laid out like earth.glb
+// models/moon.glb: a unit sphere with NASA's LRO LROC colour map, laid out like earth.glb,
+// raised to LOLA terrain at true scale (+-10 km) with a matching normal map
 // (local axes = the Moon-fixed axes in the viewer's (X, Z, Y) order), scaled to the mean lunar
 // radius. fleet.json "moon" gives it every 60 s from GMAT: its Earth-centred EarthMJ2000Eq
 // position and velocity (km, km/s; Hermite-interpolated here, as the spacecraft are) and q, its
 // rotation in the viewer's axes (Moon-fixed -> world, including libration; interpolated
 // linearly and renormalised -- it turns ~0.009 deg a minute). Lit by the same directional sun,
 // so it shows its phase. The Assets panel's Moon row centres the view on it.
-const MOON_ID = "b0e5a000-0000-4000-a000-000000000003";
-const MOON_URL = DATA_BASE_URL + "models/moon.glb";
+// Resolution levels (tools/make_moon.py): 1x 512 x 256 vertices (models/moon.glb), 2x and 4x
+// (moon_2x.glb, moon_4x.glb; built locally, too big to commit). fleet.json moon.levels lists the
+// ones built. The "1x v" box on the Assets panel's Moon row picks one: the new model loads under
+// its own id and the old one is removed only once it is in, so the Moon never disappears; lunar
+// sites move to the terrain that level draws (ground_m_levels). Each level is tiles of the same
+// lat/lon grid with two UV maps (equatorial and polar), see make_moon.py.
+const MOON_LEVELS = [1, 2, 4];
+const MOON_LEVEL_IDS = { 1: "b0e5a000-0000-4000-a000-000000000003", 2: "b0e5a000-0000-4000-a000-000000000013",
+    4: "b0e5a000-0000-4000-a000-000000000023" };
+const MOON_LEVEL_TRIANGLES = { 1: "262k", 2: "1.0M", 4: "4.2M" };
+var moonBuilt = { "1": "models/moon.glb" };   // from fleet.json moon.levels once it is loaded
+var moonLevel = 1;                            // the level shown
+var moonLoading = null;                       // the level being loaded, or null
+var moonResOpen = false;                      // the level list is open in the Assets panel
 const MOON_RADIUS_KM = 1737.4;
 const MOON_RADIUS = MOON_RADIUS_KM * KM_TO_WORLD_UNITS;
 const MOON_FRAMING = { start: 4 * MOON_RADIUS, min: 1.05 * MOON_RADIUS, max: 60 * MOON_RADIUS };
@@ -1931,15 +2509,120 @@ var moonSamples = [];           // [ [t, x, y, z, vx, vy, vz, qx, qy, qz, qw], .
 var moonNow = null;             // { km: [x, y, z], kmVel, world: Vector3, q: { x, y, z, w } } (GMAT km / Unity)
 
 function CreateMoon() {
-    MeshEntity.Create(null, MOON_URL, [MOON_URL], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
-        MOON_ID, "OnMoonLoaded");
+    LoadMoonLevel(1);
+}
+
+function LoadMoonLevel(level) {
+    moonLoading = level;
+    var url = DATA_BASE_URL + moonBuilt[String(level)];
+    MeshEntity.Create(null, url, [url], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+        MOON_LEVEL_IDS[level], "OnMoonLoaded");
 }
 
 function OnMoonLoaded(moon) {
+    var level = moonLoading;
+    moonLoading = null;
+    var old = level !== moonLevel ? Entity.Get(MOON_LEVEL_IDS[moonLevel]) : null;
+    if (old !== null) {
+        old.tag = "";
+    }
     moon.tag = "Moon";              // so SetFocus / Entity.GetByTag find it like the spacecraft
     moon.SetScale(new Vector3(MOON_RADIUS, MOON_RADIUS, MOON_RADIUS), false);
+    moonLevel = level;
+    UpdateMoon();
     moon.SetVisibility(true);
-    Report("moon: loaded");
+    if (old !== null) {
+        if (focusEntity === old) {
+            focusEntity = moon;   // the camera was following the Moon: follow the new model
+        }
+        old.Delete();
+    }
+    ApplyMoonGround();
+    hudDirty = true;
+    StartFpsWatch();
+    Report("moon: " + level + "x loaded");
+}
+
+// The level box's words: "2x v", or "4x ..." while that level loads.
+function MoonResLabel() {
+    return moonLoading !== null && moonLoading !== moonLevel ? moonLoading + "x ..." : moonLevel + "x v";
+}
+
+function ToggleMoonRes() {
+    moonResOpen = !moonResOpen;
+    hudDirty = true;
+}
+
+function SelectMoonLevel(level) {
+    moonResOpen = false;
+    hudDirty = true;
+    if (level === moonLevel || moonLoading !== null) {
+        return;
+    }
+    if (!moonBuilt[String(level)]) {
+        Report("moon: " + level + "x is not built (python tools/make_moon.py " + level + ")");
+        return;
+    }
+    LoadMoonLevel(level);
+    Report("moon: loading " + level + "x");
+}
+
+// Lunar sites stand on the terrain the shown level draws (a typed ground elevation wins).
+function SiteGroundKm(site) {
+    var levels = site.groundLevels;
+    if (site.body === "Moon" && levels && levels[String(moonLevel)] !== undefined) {
+        return levels[String(moonLevel)] / 1000;
+    }
+    return site.groundM / 1000;
+}
+
+function ApplyMoonGround() {
+    var keys = ["places", "stations"];
+    for (var k = 0; k < keys.length; k++) {
+        var sites = layers[keys[k]] ? layers[keys[k]].sites : [];
+        for (var n = 0; n < sites.length; n++) {
+            if (sites[n].body === "Moon") {
+                sites[n].groundKm = SiteGroundKm(sites[n]);
+                sites[n].heightKm = sites[n].groundKm + sites[n].aglM / 1000;
+            }
+        }
+    }
+}
+
+// ---- Frame rate ----
+// Frames per second over 5 s windows, three times, sent to the server log ("fps: ..."): after a
+// Moon level loads, and on F for the view at hand. Tick runs once per frame.
+var fpsWatch = null;          // { start, frames, reports }
+
+function WallSeconds() {
+    var d = Date.now;
+    return (d.dayOfYear - 1) * 86400 + d.hour * 3600 + d.minute * 60 + d.second + d.millisecond / 1000;
+}
+
+function StartFpsWatch() {
+    fpsWatch = { start: WallSeconds(), frames: 0, reports: 0 };
+}
+
+function UpdateFpsWatch() {
+    if (fpsWatch === null) {
+        return;
+    }
+    fpsWatch.frames++;
+    var now = WallSeconds();
+    var dt = now - fpsWatch.start;
+    if (dt < 0) {                 // the day rolled over
+        StartFpsWatch();
+    } else if (dt >= 5) {
+        Report("fps: " + (fpsWatch.frames / dt).toFixed(1) + " over " + dt.toFixed(1) + " s, Moon " + moonLevel
+            + "x, camera " + (focusTag || "?"));
+        fpsWatch.reports++;
+        if (fpsWatch.reports >= 3) {
+            fpsWatch = null;
+        } else {
+            fpsWatch.start = now;
+            fpsWatch.frames = 0;
+        }
+    }
 }
 
 // The Moon at time t: position (GMAT km and Unity world units), velocity and rotation.
@@ -1975,15 +2658,15 @@ function MoonAt(t) {
 
 function UpdateMoon() {
     moonNow = MoonAt(elapsedSeconds);
-    var moon = Entity.Get(MOON_ID);
+    var moon = Entity.Get(MOON_LEVEL_IDS[moonLevel]);
     if (moon === null || moonNow === null) {
         return;
     }
-    moon.SetPosition(moonNow.world, false);
+    SetWorld(moon, moonNow.world);
     moon.SetRotation(new Quaternion(moonNow.q.x, moonNow.q.y, moonNow.q.z, moonNow.q.w), false);
     var grid = Entity.Get(MOON_GRID_ID);
     if (grid !== null && gridOn.Moon) {
-        grid.SetPosition(moonNow.world, false);
+        SetWorld(grid, moonNow.world);
         grid.SetRotation(new Quaternion(moonNow.q.x, moonNow.q.y, moonNow.q.z, moonNow.q.w), false);
     }
 }
@@ -2131,21 +2814,22 @@ function CreateSites(key, list) {
     for (var n = 0; n < list.length; n++) {
         var lat = list[n].lat * Math.PI / 180, lon = list[n].lon * Math.PI / 180;
         var site = { name: list[n].name, ecef: list[n].ecef_km, id: NextSiteId(), world: null, upWorld: null,
-            heightKm: (list[n].ground_m + list[n].agl_m) / 1000,
+            groundM: list[n].ground_m, groundLevels: list[n].ground_m_levels || null,
             body: list[n].body || "Earth",
             // straight up (the ellipsoid normal), Earth-fixed
             up: [Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat)], links: {},
             east: [-Math.sin(lon), Math.cos(lon), 0],
             north: [-Math.sin(lat) * Math.cos(lon), -Math.sin(lat) * Math.sin(lon), Math.cos(lat)],
-            groundKm: list[n].ground_m / 1000,
             lat: list[n].lat, lon: list[n].lon, aglM: list[n].agl_m,
-            freqMhz: list[n].freq_mhz, fovDeg: list[n].fov_deg,
-            gainDbi: list[n].gain_dbi, tsysK: list[n].tsys_k, txW: list[n].tx_w,
+            fovDeg: list[n].fov_deg, radios: list[n].radios || [],
             below: key === "stations",     // label below the dot (places: above)
             layer: key };
+        site.terrain = site.body === "Moon" ? (fleetTerrain[SiteKey(site)] || null) : null;
+        site.groundKm = SiteGroundKm(site);
+        site.heightKm = site.groundKm + site.aglM / 1000;
         layer.sites.push(site);
         SiteWorld(site);
-        MeshEntity.Create(null, layer.marker, [layer.marker], site.world, new Quaternion(0, 0, 0, 1),
+        MeshEntity.Create(null, layer.marker, [layer.marker], ToUnity(site.world), new Quaternion(0, 0, 0, 1),
             site.id, "OnSiteLoaded");
         var words = site.name, lines = 1;
         if (key === "stations") {
@@ -2157,7 +2841,7 @@ function CreateSites(key, list) {
                 var linkId = NextSiteId();
                 site.links[fleetTags[k]] = linkId;
                 linkShown[linkId] = false;
-                MeshEntity.Create(null, LINK_URLS[site.link], [LINK_URLS[site.link]], site.world,
+                MeshEntity.Create(null, LINK_URLS[site.link], [LINK_URLS[site.link]], ToUnity(site.world),
                     new Quaternion(0, 0, 0, 1), linkId, "OnLinkLoaded");
             }
         }
@@ -2236,7 +2920,7 @@ function RotationFromUp(x, y, z) {
 }
 
 function UpdateSites() {
-    var cam = Camera.GetPosition(false);
+    var cam = CameraWorld();
     for (var n = 0; n < LAYER_KEYS.length; n++) {
         var layer = layers[LAYER_KEYS[n]];
         for (var i = 0; i < layer.sites.length; i++) {
@@ -2247,7 +2931,7 @@ function UpdateSites() {
             if (marker !== null) {
                 var dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z;
                 var r = SITE_SIZE_PER_DISTANCE * Math.sqrt(dx * dx + dy * dy + dz * dz);
-                marker.SetPosition(p, false);
+                SetWorld(marker, p);
                 marker.SetScale(new Vector3(r, r, r), false);
             }
             for (var tag in site.links) {
@@ -2269,7 +2953,7 @@ function UpdateLink(site, tag, layerOn) {
     var q = null;
     if (layerOn && craft !== null) {
         // in the beam? -- from the true (WGS84) position
-        q = craft.GetPosition(false);
+        q = GetWorld(craft);
         var p = site.trueWorld, u = site.upWorld;
         var tx = q.x - p.x, ty = q.y - p.y, tz = q.z - p.z;
         var tdist = Math.sqrt(tx * tx + ty * ty + tz * tz);
@@ -2280,13 +2964,20 @@ function UpdateLink(site, tag, layerOn) {
         } else if (show && moonNow !== null) {
             show = !SegmentHitsSphere(p, q, moonNow.world, MOON_RADIUS, false);
         }
+        // nor the terrain around a Moon station (its horizon mask)
+        if (show && site.terrain) {
+            var e = site.eastWorld, n = site.northWorld;
+            var el = Math.asin((tx * u[0] + ty * u[1] + tz * u[2]) / tdist) * 180 / Math.PI;
+            var az = Math.atan2(tx * e[0] + ty * e[1] + tz * e[2], tx * n[0] + ty * n[1] + tz * n[2]) * 180 / Math.PI;
+            show = el >= HorizonAt(site.terrain, az);
+        }
     }
     if (show) {
         // drawn from the dot as shown on the globe to the spacecraft
         var w = site.world;
         var dx = q.x - w.x, dy = q.y - w.y, dz = q.z - w.z;
         var dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        link.SetPosition(w, false);
+        SetWorld(link, w);
         link.SetRotation(RotationFromUp(dx / dist, dy / dist, dz / dist), false);
         link.SetScale(new Vector3(1, dist, 1), false);
     }
@@ -2371,7 +3062,8 @@ function EndMove() {
 
 function ShowGrips() {
     var grips = { hud: hud !== null ? hud.grip : null, info: info !== null ? info.grip : null,
-        att: attPanel !== null ? attPanel.grip : null, chart: chartPanel !== null ? chartPanel.grip : null };
+        att: attPanel !== null ? attPanel.grip : null, chart: chartPanel !== null ? chartPanel.grip : null,
+        plot: plotPanel !== null ? plotPanel.grip : null };
     for (var key in grips) {
         if (grips[key]) {
             grips[key].SetColor(panelMove === key ? GRIP_ARMED : GRIP_COLOR);
@@ -2385,10 +3077,11 @@ function PickSite() {
         Report("click: the pointer ray hit nothing");   // empty space, or no colliders
         return;
     }
-    var cam = Camera.GetPosition(false);
+    var cam = CameraWorld();
     var q = Camera.GetRotation(false);
     var f = Rotate(q, 0, 0, 1), r = Rotate(q, 1, 0, 0), u = Rotate(q, 0, 1, 0);
-    var dx = hit.hitPoint.x - cam.x, dy = hit.hitPoint.y - cam.y, dz = hit.hitPoint.z - cam.z;
+    var hp = FromUnity(hit.hitPoint);
+    var dx = hp.x - cam.x, dy = hp.y - cam.y, dz = hp.z - cam.z;
     var df = dx * f[0] + dy * f[1] + dz * f[2];
     if (df <= 0) {
         return;
@@ -2396,7 +3089,7 @@ function PickSite() {
     // the click, in view units
     var sx = (dx * r[0] + dy * r[1] + dz * r[2]) / df;
     var sy = (dx * u[0] + dy * u[1] + dz * u[2]) / df;
-    if (OverHud(sx, sy) || OverLeftPanels(sx, sy) || OverChartPanel(sx, sy)) {
+    if (OverHud(sx, sy) || OverLeftPanels(sx, sy) || OverChartPanel(sx, sy) || OverPlotPanel(sx, sy)) {
         return;
     }
     var best = null, bestScore = Infinity;
@@ -2444,7 +3137,7 @@ function OverHud(sx, sy) {
     }
     var s = HUD_WORLD_WIDTH / HUD_W;
     var h = (hudOpen ? hud.height : HUD_PAD + HUD_ROW + HUD_GAP) * s;
-    var x = sx * HUD_DISTANCE - panelOffset.hud.x, y = sy * HUD_DISTANCE - panelOffset.hud.y;
+    var x = sx * HUD_REF - panelOffset.hud.x, y = sy * HUD_REF - panelOffset.hud.y;
     return x >= HUD_RIGHT_EDGE - HUD_WORLD_WIDTH && x <= HUD_RIGHT_EDGE && y <= HUD_TOP_EDGE && y >= HUD_TOP_EDGE - h;
 }
 
@@ -2479,7 +3172,7 @@ function CentreSite(site) {
     }
     // start from where the camera is now, in the site's ground frame
     SiteWorld(site);
-    var cam = Camera.GetPosition(false);
+    var cam = CameraWorld();
     var v = [cam.x - site.world.x, cam.y - site.world.y, cam.z - site.world.z];
     var dist = Math.max(SITE_MIN_DIST, Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]));
     var up = Dot3(v, site.upWorld) / dist;
@@ -2530,7 +3223,7 @@ function HighestCraftAzimuth(site) {
         if (craft === null) {
             continue;
         }
-        var q = craft.GetPosition(false), p = site.trueWorld;
+        var q = GetWorld(craft), p = site.trueWorld;
         var d = [q.x - p.x, q.y - p.y, q.z - p.z];
         var len = Math.sqrt(Dot3(d, d));
         var up = Dot3(d, site.upWorld) / len;
@@ -2601,7 +3294,7 @@ function PlaceSiteCamera() {
         forward = [-g.dir[0], -g.dir[1], -g.dir[2]];
         up = g.up;
     }
-    Camera.SetPosition(new Vector3(pos[0], pos[1], pos[2]), false);
+    SetCameraWorld(new Vector3(pos[0], pos[1], pos[2]));
     Camera.SetRotation(LookRotation(forward, up), false);
 }
 
@@ -2661,7 +3354,7 @@ function UpdateSelectBox() {
     if (box === null) {
         return;
     }
-    var cam = Camera.GetPosition(false);
+    var cam = CameraWorld();
     var site = siteView !== null ? siteView.site : null;
     var show = site !== null && siteView.mode === "orbit" && layers[site.layer].on && !BehindBodies(cam, site.world);
     if (show !== selectShown) {
@@ -2676,25 +3369,27 @@ function UpdateSelectBox() {
     var dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
     var k = LABEL_DRAW_DISTANCE / dist;
     var half = SELECT_SIZE_PER_DISTANCE * dist * k;
-    box.SetPosition(new Vector3(cam.x + dx * k, cam.y + dy * k, cam.z + dz * k), false);
+    SetWorld(box, new Vector3(cam.x + dx * k, cam.y + dy * k, cam.z + dz * k));
     box.SetRotation(Camera.GetRotation(false), false);
     box.SetScale(new Vector3(half, half, half), false);
 }
 
 // ---- 10 degree grids ----
 // Latitude / longitude lines every 10 deg (models/grid.glb, written by tools/places.py: unit
-// radius 1.0015 -- ~10 km above the Earth, ~3 km above the Moon; the equator and the prime
-// meridian in gold), one on each body. grid.glb is laid out like earth.glb and moon.glb, so the
+// radius 1.0015 -- ~10 km above the Earth; the equator and the prime meridian in gold), one on
+// each body. The Moon's is scaled up to MOON_GRID_LIFT_KM above the mean radius, clear of the
+// highest LOLA terrain on moon.glb (10.7 km). grid.glb is laid out like earth.glb and moon.glb, so the
 // Earth's grid turns with the Earth (RotateEarth) and the Moon's is placed and turned with the
 // Moon (UpdateMoon). Each is switched by the [#] box on its body's row in the Assets panel (L:
 // the grid of the body in view). Off at start.
 const GRID_URL = DATA_BASE_URL + "models/grid.glb";
 const GRID_ID = "b0e5a000-0000-4000-a000-000000000001";
 const MOON_GRID_ID = "b0e5a000-0000-4000-a000-000000000005";
+const MOON_GRID_LIFT_KM = 12;
 var gridOn = { Earth: false, Moon: false };
 
 function CreateGrid() {
-    MeshEntity.Create(null, GRID_URL, [GRID_URL], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
+    MeshEntity.Create(null, GRID_URL, [GRID_URL], ToUnity(new Vector3(0, 0, 0)), new Quaternion(0, 0, 0, 1),
         GRID_ID, "OnGridLoaded");
     MeshEntity.Create(null, GRID_URL, [GRID_URL], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
         MOON_GRID_ID, "OnMoonGridLoaded");
@@ -2706,7 +3401,8 @@ function OnGridLoaded(grid) {
 }
 
 function OnMoonGridLoaded(grid) {
-    grid.SetScale(new Vector3(MOON_RADIUS, MOON_RADIUS, MOON_RADIUS), false);
+    var s = (MOON_RADIUS_KM + MOON_GRID_LIFT_KM) * KM_TO_WORLD_UNITS / 1.0015;
+    grid.SetScale(new Vector3(s, s, s), false);
     grid.SetVisibility(gridOn.Moon);
 }
 
@@ -2766,9 +3462,18 @@ function ApplyFleet(parsed) {
     }
     fleetCraft = parsed.craft || {};
     instrumentDefs = parsed.instruments || {};
-    fleetPayloads = parsed.payloads || {};
+    fleetRadios = parsed.radios || {};
     fleetCharts = parsed.charts || {};
+    fleetTerrain = parsed.terrain || {};
+    fleetTerrainCharts = parsed.terrain_charts || {};
+    fleetTimelines = parsed.timelines || {};
+    spanFiles = {};                  // a new fleet run: the longer spans are drawn afresh
+    spanFailed = {};
+    spanRetryAt = {};
     moonSamples = parsed.moon ? parsed.moon.samples : [];
+    if (parsed.moon && parsed.moon.levels) {
+        moonBuilt = parsed.moon.levels;
+    }
     CreateMissingCraft();
     fleetGeneratedT = parsed.generated_t;
     fleetElements = parsed.elements || {};
@@ -2943,8 +3648,8 @@ function UpdateOrbit() {
         }
         var p = PositionAt(fleet[fleetTags[n]], elapsedSeconds);
         // GMAT is right-handed Z-up, Unity left-handed Y-up: swapping Y and Z converts both.
-        entity.SetPosition(new Vector3(p[0] * KM_TO_WORLD_UNITS, p[2] * KM_TO_WORLD_UNITS,
-            p[1] * KM_TO_WORLD_UNITS), false);
+        SetWorld(entity, new Vector3(p[0] * KM_TO_WORLD_UNITS, p[2] * KM_TO_WORLD_UNITS,
+            p[1] * KM_TO_WORLD_UNITS));
     }
 }
 

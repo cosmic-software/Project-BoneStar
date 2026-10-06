@@ -27,7 +27,8 @@ groundstations.xlsx, sheet "Ground stations": the same five columns, then
 - Altitude AGL: metres above the ground (an antenna on a 10 m mast = 10). Blank = 0.
 - Ground elevation: metres above mean sea level, optional. Left blank, it is looked up from
   the Copernicus GLO-90 terrain model via the Open-Meteo elevation API (free, no key) and
-  cached in data/elevation_cache.json, so each place is looked up once.
+  cached in data/elevation_cache.json, so each place is looked up once. Moon sites: metres
+  above the mean lunar radius; left blank, it is the terrain the Moon model draws there (LOLA).
 
 Height above the WGS84 ellipsoid is taken as ground elevation + AGL. Mean sea level differs
 from the ellipsoid by the geoid height (-106 to +85 m worldwide); that is ignored, which is
@@ -48,10 +49,14 @@ import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from linkbudget import band_of
+
 ROOT = Path(__file__).resolve().parent.parent
 PLACES_XLSX = ROOT / "places.xlsx"
 STATIONS_XLSX = ROOT / "groundstations.xlsx"
 ELEVATION_CACHE = ROOT / "data" / "elevation_cache.json"
+MOON_GLBS = {1: ROOT / "models" / "moon.glb", 2: ROOT / "models" / "moon_2x.glb",
+             4: ROOT / "models" / "moon_4x.glb"}     # tools/make_moon.py
 MARKER_GLB = ROOT / "models" / "place.glb"
 STATION_GLB = ROOT / "models" / "station.glb"
 GRID_GLB = ROOT / "models" / "grid.glb"
@@ -267,8 +272,8 @@ def parse_station(cells):
     freq, fov, link, gain, tsys, tx = cells
     freq_mhz = parse_metres(freq, "Frequency")      # same rules: a number, blank = None
     fov_deg = parse_metres(fov, "Beam FOV")
-    if freq_mhz is None or freq_mhz <= 0:
-        raise PlacesError("Frequency (MHz) is needed and must be above 0")
+    if freq_mhz is not None and freq_mhz <= 0:
+        raise PlacesError("Frequency (MHz) must be above 0")      # blank: the Station radios sheet has its radios
     if fov_deg is None or not 0 < fov_deg <= 180:
         raise PlacesError("Beam FOV (deg) is needed, above 0 and at most 180")
     radio = {"gain_dbi": parse_metres(gain, "Antenna gain"), "tsys_k": parse_metres(tsys, "System noise temperature"),
@@ -286,15 +291,145 @@ def read_places(path=PLACES_XLSX):
 
 
 def read_ground_stations(path=STATIONS_XLSX):
-    """As read_places, plus freq_mhz, fov_deg and link ("1-way" / "2-way")."""
-    return read_sites(path, "Ground stations", parse_station)
+    """As read_places, plus fov_deg, link ("1-way" / "2-way") and radios (read_station_radios);
+    freq_mhz is the station sheet's old single frequency, if given."""
+    stations = read_sites(path, "Ground stations", parse_station)
+    radios = read_station_radios(path, [s["name"] for s in stations])
+    errors = []
+    for st in stations:
+        if st["name"] in radios:
+            st["radios"] = radios[st["name"]]
+        elif st["freq_mhz"] is not None:
+            # no rows in Station radios: the station sheet's own frequency and radio columns
+            band = band_of(st["freq_mhz"])
+            st["radios"] = [{"name": f"{band}-band", "down_mhz": st["freq_mhz"], "up_mhz": None, "band": band,
+                             "up_band": None, "gain_dbi": st["gain_dbi"], "tsys_k": st["tsys_k"], "tx_w": st["tx_w"]}]
+        else:
+            errors.append(f"ground station {st['name']}: no radio -- give it rows in the Station radios sheet "
+                          "(or a Frequency (MHz) in its own row)")
+    if errors:
+        raise PlacesError("\n".join(errors))
+    return stations
+
+
+def site_key(site):
+    """A site's key in fleet.json's per-site results (terrain, plots): a place and a ground
+    station may share a name (a lander and its antenna), so the layer is part of it."""
+    return ("station:" if site.get("fov_deg") is not None else "place:") + site["name"]
+
+
+RADIO_COLUMNS = ["Station", "Radio", "Downlink (MHz)", "Uplink (MHz)", "Antenna gain (dBi)",
+                 "System noise temperature (K)", "Tx power (W)"]
+
+
+def read_station_radios(path, names):
+    """Sheet "Station radios" (in the ground-station file): one row per antenna / band a station
+    supports, any number per station:
+
+        Station | Radio | Downlink (MHz) | Uplink (MHz) | Antenna gain (dBi)
+        | System noise temperature (K) | Tx power (W)
+
+    Downlink (MHz) is what the station receives; its band picks the spacecraft radios it works
+    with (tools/linkbudget.py). Uplink (MHz) is what it transmits on a 2-way link (blank: the
+    spacecraft radio's uplink frequency is used). Gain and noise temperature give the downlink
+    budget, Tx power and gain the uplink. Radio is a name (blank = its band).
+    Returns {station name: [radio, ...]}; {} without the sheet."""
+    path = pick_file(path)
+    if path is None:
+        return {}
+    try:
+        rows = read_sheet(path, "Station radios")
+    except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
+        raise PlacesError(f"{path.name} could not be read as a spreadsheet ({e})")
+    if not rows or [str(c or "").strip() for c in (rows[0] + [None, None])[:2]] != ["Station", "Radio"]:
+        return {}                                   # no Station radios sheet (read_sheet fell back to the first)
+    out, errors = {}, []
+    for n, row in enumerate(rows[1:], start=2):
+        row = (row + [None] * 7)[:7]
+        if all(c is None or (isinstance(c, str) and not c.strip()) for c in row):
+            continue
+        try:
+            who = (f"{row[0]:g}" if isinstance(row[0], float) else str(row[0] or "")).strip()
+            if who not in names:
+                raise PlacesError(f"no ground station called '{who}'")
+            r = {key: parse_metres(cell, title) for key, title, cell in zip(
+                ("down_mhz", "up_mhz", "gain_dbi", "tsys_k", "tx_w"), RADIO_COLUMNS[2:], row[2:])}
+            if r["down_mhz"] is None or r["down_mhz"] <= 0:
+                raise PlacesError("Downlink (MHz) is needed and must be above 0: it sets the radio's band")
+            for key in ("up_mhz", "tsys_k", "tx_w"):
+                if r[key] is not None and r[key] <= 0:
+                    raise PlacesError(f"{RADIO_COLUMNS[2 + list(r).index(key)]} must be above 0")
+            r["band"], r["up_band"] = band_of(r["down_mhz"]), band_of(r["up_mhz"])
+            name = (f"{row[1]:g}" if isinstance(row[1], float) else str(row[1] or "")).strip()
+            r["name"] = name or f"{r['band']}-band"
+            if any(x["name"] == r["name"] for x in out.get(who, [])):
+                raise PlacesError(f"{who} has two radios called '{r['name']}'")
+            out.setdefault(who, []).append(r)
+        except PlacesError as e:
+            errors.append(f"{path.name} Station radios row {n}: {e}")
+    if errors:
+        raise PlacesError("\n".join(errors))
+    return out
+
+
+_moon_terrain = {}
+
+
+def moon_terrain(level):
+    """(seg, ring, heights km) of a Moon level's vertex grid, from the extras that
+    tools/make_moon.py writes into the glb (only the header and that block are read), or None
+    if that level isn't built."""
+    if level not in _moon_terrain:
+        path = MOON_GLBS[level]
+        _moon_terrain[level] = None
+        if path.exists():
+            with open(path, "rb") as f:
+                head = f.read(20)
+                n = struct.unpack("<I", head[12:16])[0]
+                gltf = json.loads(f.read(n))
+                extras = gltf["nodes"][-1].get("extras", {}) if gltf.get("nodes") else {}
+                if "heights_km_bufferView" in extras:
+                    seg, ring = extras["grid"]
+                    view = gltf["bufferViews"][extras["heights_km_bufferView"]]
+                    f.seek(20 + n + 8 + view.get("byteOffset", 0))
+                    heights = struct.unpack(f"<{(seg + 1) * (ring + 1)}f", f.read(view["byteLength"]))
+                    _moon_terrain[level] = (seg, ring, heights)
+    return _moon_terrain[level]
+
+
+def moon_levels():
+    """The Moon levels (1, 2, 4) whose models are built."""
+    return [lv for lv in sorted(MOON_GLBS) if moon_terrain(lv) is not None]
+
+
+def moon_ground_m(lat_deg, lon_deg, level=1):
+    """Ground height (m above the mean lunar radius) of the terrain a Moon level draws (LOLA),
+    interpolated on the mesh triangle under the point, so a site sits on the surface the viewer
+    shows. None if that level isn't built. Within ~70 m above the flat triangles at 1x (the
+    sphere's curvature between vertices), less at 2x / 4x."""
+    terrain = moon_terrain(level)
+    if terrain is None:
+        return None
+    seg, ring, heights = terrain
+    # the same quad split as the mesh: (a, b, a+1) and (a+1, b, b+1), a = row i, b = row i+1
+    fi = min(max((90 - lat_deg) / 180 * ring, 0.0), ring - 1e-9)
+    fj = min(max((lon_deg + 180) / 360 * seg, 0.0), seg - 1e-9)
+    i, j = int(fi), int(fj)
+    fi, fj = fi - i, fj - j
+    h = lambda ii, jj: heights[ii * (seg + 1) + jj]
+    if fi + fj <= 1:
+        km = h(i, j) + fi * (h(i + 1, j) - h(i, j)) + fj * (h(i, j + 1) - h(i, j))
+    else:
+        km = h(i + 1, j + 1) + (1 - fi) * (h(i, j + 1) - h(i + 1, j + 1)) + (1 - fj) * (h(i + 1, j) - h(i + 1, j + 1))
+    return km * 1000
 
 
 def read_sites(path, sheet, extra=None):
     """The five location columns of each row, plus extra(the next three columns) if given,
     then Body (Earth / Moon, blank = Earth): column F for places, I for ground stations.
-    Moon sites: positions in the Moon's body-fixed frame on a sphere of the mean radius; ground
-    elevation (metres above that radius) is never looked up -- blank = 0."""
+    Moon sites: positions in the Moon's body-fixed frame about a sphere of the mean radius; a
+    blank ground elevation (metres above that radius) is the terrain the finest built Moon
+    level draws under the site (LOLA), with each level's in ground_m_levels; 0 if none is built."""
     path = pick_file(path)
     if path is None:
         return []
@@ -327,7 +462,13 @@ def read_sites(path, sheet, extra=None):
             if extra:
                 place.update(extra(row[5:8] + row[9:12]))
             if place["body"] == "Moon" and place["ground_m"] is None:
-                place["ground_m"], place["ground_source"] = 0.0, "mean lunar radius"
+                # the terrain each built Moon level draws there; the finest one is the height used
+                levels = {lv: round(moon_ground_m(place["lat"], place["lon"], lv), 1) for lv in moon_levels()}
+                if levels:
+                    place["ground_m_levels"] = levels
+                    place["ground_m"], place["ground_source"] = levels[max(levels)], f"LOLA terrain (Moon {max(levels)}x)"
+                else:
+                    place["ground_m"], place["ground_source"] = 0.0, "mean lunar radius"
             names.add(name)
             places.append(place)
         except PlacesError as e:

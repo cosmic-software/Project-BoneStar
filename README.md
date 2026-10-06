@@ -41,7 +41,8 @@ tools/    run_fleet.py (the fleet job), update_tles.py (refresh TLEs from CelesT
 gmat/     GMAT scenario scripts (the single-orbit demo)
 data/     generated output: OEMs, JSON, the generated GMAT script (not committed)
 models/   probe.glb (spacecraft), earth.glb (NASA Blue Marble globe, unit radius),
-          moon.glb (NASA LRO LROC colour map, unit radius),
+          moon.glb (NASA LRO LROC colour map + LOLA terrain, unit mean radius; 1x,
+          built by tools/make_moon.py, which also builds moon_2x.glb / moon_4x.glb locally),
           source/ (models as authored, cameras included; see Instrument view),
           atmosphere.glb (glow shells + night-side caps, unit = Earth radius),
           grid.glb (10 deg latitude / longitude lines, unit = Earth radius),
@@ -142,6 +143,8 @@ What you see:
 | G | atmosphere (glow and night side) on / off |
 | V (hold) | pie menu, acting on the selection. **Show info**: a panel on the left: a spacecraft's osculating elements (SMA, ECC, INC, RAAN, AOP, TA, argument of latitude, period, apoapsis / periapsis), attitude and next passes, or a place's / station's location, settings, current contacts and next passes. **Show data**: the instrument view (below). **Align camera**: a spacecraft, look along its velocity with its body below. **Align vehicle**: a spacecraft's attitude panel (below) |
 | [#] box on the Earth / Moon row, L | 10 deg latitude / longitude grid on that body, turning with it (equator and prime meridian in gold); L: the body in view |
+| 1x v box on the Moon row | Moon resolution: 1x, 2x or 4x (see Moon resolution) |
+| F | frame rate over the next 15 s, written to the server log (`fps: ...`) |
 | Spacecraft [x] box; All orbit lines [x], O | show / hide each spacecraft's orbit (one period, centred on it), or all of them |
 | Update TLEs row | fetch fresh TLEs, rerun GMAT, reload the viewer (about 3-20 s) |
 | Click a place or ground station (its dot, label or panel row) | select it: a white square marks it and the view locks onto it, fixed to the ground as the Earth turns; drag orbits around it, zoom moves in (to 50 km) and out. Earth, R or the arrow keys leave |
@@ -214,17 +217,49 @@ GMAT reports the Moon's position and velocity every 60 s, and its orientation (M
 frame, with libration), solved from the Earth's and the Sun's directions seen from the Moon in
 both frames. Checked: it turns 13.1757 deg/day (sidereal 13.1764) and its 0 deg longitude stays
 within 4.2 deg of the Earth (libration). `moon.glb` carries NASA's LRO LROC colour map (SVS CGI
-Moon Kit) on a unit sphere laid out like `earth.glb`; the viewer scales it to the mean radius
-(1737.4 km), places and turns it, and the sun lights it, so it shows its phase. The Assets
+Moon Kit) on a unit sphere laid out like `earth.glb`, raised to the LRO LOLA elevation map at
+true scale with normal maps from the same elevation data for the finer slopes; the viewer
+scales it to the mean radius (1737.4 km), places and turns it, and the sun lights it, so it shows its phase. The Assets
 panel's **Moon** row centres the view on it. The camera draws out to 10,000 units (1 million
 km), so the Moon (~3,800 units away) is always in range.
+
+### Moon resolution
+
+<img src="docs/images/moon-south-pole-terrain.png" alt="Ground view at the lunar south pole at 2x: LOLA terrain on the polar-mapped caps, LID 1 selected, the two lunar ground stations below it, the Earth above the horizon">
+<sub>The lunar south pole in ground view at 2x: the cap beyond 60 deg is drawn with the polar
+(stereographic) maps, so the terrain stays sharp right at the pole. LID 1 is selected; the
+Example lunar station and the lunar south pole station sit on the terrain below it, and the
+Earth hangs above the horizon.</sub>
+
+The Assets panel's Moon row has a small **1x v** drop-down: 1x, 2x or 4x. `tools/make_moon.py`
+builds the levels from NASA's CGI Moon Kit (downloaded once into `data/moon_source/`):
+
+| Level | Vertex grid (spacing at the equator) | Triangles | File | Colour / normal maps | Polar maps | Elevation |
+|---|---|---|---|---|---|---|
+| 1x | 512 x 256 (21 km) | 262k | `models/moon.glb`, 16 MB, committed | 2048 x 1024 | 1024 x 1024 | 16 px/deg |
+| 2x | 1024 x 512 (10.7 km) | 1.0M | `models/moon_2x.glb`, 62 MB | 4096 x 2048 | 2048 x 2048 | 16 px/deg |
+| 4x | 2048 x 1024 (5.3 km) | 4.2M | `models/moon_4x.glb`, 248 MB | 8192 x 4096 | 4096 x 4096 | 64 px/deg |
+
+2x and 4x are too big for GitHub, so they are built locally: `python tools/make_moon.py 2 4`
+(about 1.5 minutes), then **Update TLEs** so the viewer lists them. A level loads in the
+background and replaces the shown one when it is in; F logs the frame rate to the server log.
+
+The Moon keeps its own coordinate system at every level: both UV maps are defined by latitude
+and longitude, not pixels, so a map of any resolution drops in. **UV0** is equirectangular
+(`u = 0.5 + lon/360`, `v = 0.5 - lat/180`) for the band up to 60 deg; **UV1** is polar
+stereographic about each pole (PDS / LOLA convention; the image's edge is at 55 deg on its
+axes) for the caps beyond 60 deg, one image per pole, which also keeps the normal map well
+defined at the pole itself. Lunar sites stand on the terrain of the level shown: at the south
+pole the levels differ by up to 3 km (1x vertices are 21 km apart in latitude there), and 4x is
+within ~0.3 km of the full 64 px/deg LOLA map at the example sites.
 
 ### Adding places
 
 Each spreadsheet row has a **Body** column (places: F, ground stations: I): Earth or Moon,
-blank = Earth. Moon sites sit on the lunar surface (a sphere of the mean radius, 1737.4 km) and
-turn with the Moon; their ground elevation is metres above that radius and is never looked up
-(blank = 0). A station's link lines and passes also need the line of sight to miss the Earth
+blank = Earth. Moon sites sit on the lunar surface and turn with the Moon; their
+ground elevation is metres above the mean radius (1737.4 km). Leave it blank and it is the
+height of the terrain the Moon model draws under the site (LOLA), for each built level, so the
+dot sits on the surface you see; passes use the finest level's. A station's link lines and passes also need the line of sight to miss the Earth
 and the Moon, so an Earth station tracking a Moon orbiter loses it behind the Moon.
 
 Open `places.xlsx` in Excel (or LibreOffice) and add one row per place on the **Places**
@@ -311,21 +346,41 @@ shadows from opaque meshes and those lines laid dark bands across the Earth and 
 
 ### Link budgets and charts
 
-Each ground station can have a radio (`groundstations` columns J-L: antenna gain in dBi, system
-noise temperature in K, uplink transmit power in W) and each spacecraft one too
-(`spacecraft.xlsx`, sheet **Payloads**, by name or catalog number, TLE spacecraft included:
-transmit power, antenna gain, downlink rate, required Eb/N0, receive G/T, uplink rate, other
-losses). `tools/linkbudget.py` holds the equations (free space, clear sky: EIRP, path loss, G/T,
-C/N0, Eb/N0, margin); checked by hand (S-band at 1000 km: 159.49 dB path loss) and against
-the viewer's copy (identical to 1e-13 dB over 10,000 random cases).
+<img src="docs/images/lunar-orbiter-link.png" alt="The example lunar orbiter in Nadir attitude with a link line past the Moon's limb to the Example station on Earth; the info panel lists its elements, the live link budget and the next passes">
+<sub>Line of sight: the example lunar orbiter (Nadir attitude) in contact with the Example
+station on the Earth, just above the Moon's limb. A link line is drawn only while the
+spacecraft is inside the station's beam and nothing blocks the line between them; the info
+panel shows its elements, the live link budget and the next passes, including the ones to the
+lunar south-pole stations.</sub>
 
-**Show info** on a station lists, for every spacecraft in its beam, the range, path loss and
-the downlink (and, for 2-way, uplink) Eb/N0 and margin, live, flagged "NOT CLOSING" below
-0 dB; on a spacecraft, the same for every station that has it.
+Links are worked out **radio by radio**, so a spacecraft can carry S-band TT&C, an X-band
+science downlink and a Ka-band link at once, and a station can have an antenna per band:
+
+- `spacecraft.xlsx`, sheet **Radios**: one row per radio, by spacecraft name or catalog number
+  (TLE spacecraft too): Radio (a name), Downlink (MHz), Uplink (MHz), Tx power (W), antenna gain
+  (dBi), downlink rate (bps), required Eb/N0 (dB), Rx G/T (dB/K), uplink rate (bps), other losses.
+- `groundstations`, sheet **Station radios**: one row per antenna / band a station supports:
+  Station, Radio, Downlink (MHz, what it receives), Uplink (MHz, what it sends on a 2-way link),
+  antenna gain (dBi), system noise temperature (K), Tx power (W). A station with no rows there
+  still works from its old Frequency column and columns J-L (one radio).
+
+A station radio and a spacecraft radio make a link when their downlink frequencies are in the
+same band (IEEE letter bands: L 1-2 GHz, S 2-4, C 4-8, X 8-12, Ku 12-18, K 18-27, Ka 27-40).
+Each link gets its own budget: the downlink at the spacecraft radio's downlink frequency, the
+uplink at its uplink frequency (a blank one takes the other end's). `tools/linkbudget.py` holds
+the equations (free space, clear sky: EIRP, path loss, G/T, C/N0, Eb/N0, margin); checked by hand
+(S-band at 1000 km: 159.49 dB path loss; the uplink at 2050 MHz: 158.68 dB) and against the
+viewer's own code, run as is in a JavaScript engine: the same radio pairs and margins to 1e-13 dB
+over 10,000 random cases (14,690 radio pairs).
+
+**Show info** on a station lists its radios and, for every spacecraft in its beam, the range and
+each shared band's downlink (and, for 2-way, uplink) frequency, rate, Eb/N0 and margin, live,
+flagged "NOT CLOSING" below 0 dB; on a spacecraft, the same for every station that has it.
 
 The fleet job also draws a chart per station with matplotlib (`tools/charts.py`): its contacts
-over the window, elevation through each pass and downlink margin through each pass (each
-against the share of the pass, AOS to LOS), with the beam edge and the 0 dB line. The viewer
+over the window, elevation through each pass and downlink margin through each pass, one line
+per radio (colour: the spacecraft; line style: the radio), each against the share of the pass
+(AOS to LOS), with the beam edge and the 0 dB line. The viewer
 shows the selected station's chart in a panel at the bottom right while Show info is open
 (`::` grip to move it). Checked: the charts' geometry reproduces every pass's peak elevation to
 0.005 deg, and every pass starts and ends at the beam edge or where the Earth / Moon blocks it.
@@ -356,6 +411,91 @@ the window (AOS / LOS to 0.05 s, peak elevation), with the same beam test and Ea
 the viewer uses for link lines. Checked against GMAT's own ContactLocator (5 deg mask, i.e. a
 170 deg beam) for the example station: the same 4 passes, AOS and LOS within ~1 s, durations
 within 0.3 s (the viewer turns the Earth about the J2000 pole, ~0.15 deg from the true pole).
+
+### Lunar terrain: sunlight and line of sight
+
+For every site on the Moon, `tools/terrain.py` works out from the LRO LOLA elevation map
+(64 px/deg, ~470 m; downloaded by `tools/make_moon.py` into `data/moon_source/`):
+
+- **Horizon mask**: the terrain's elevation angle every 0.25 deg of azimuth, marched out 600 km
+  along each great circle with the Moon's curvature, from the site's eye (LOLA ground + its
+  height above the ground). A blank ground elevation in the spreadsheet is LOLA's.
+- **Sunlight**: the share of the Sun's disc (its true size) above the terrain, now and over the
+  next 30 days (5 min steps) and 365 days (30 min steps): time in sunlight, whole disc, mean
+  disc and the longest stretch without Sun (for battery sizing).
+- **Earth in sight**: the Earth's centre above the terrain (direct-to-Earth links), the same way.
+- **Passes**: a Moon station's passes also need the spacecraft above its terrain horizon, and
+  each AOS / LOS says what set it (`aos_by` / `los_by`: beam, terrain, body or window). The
+  viewer draws link lines with the same test, and marks terrain-limited passes.
+
+Show info on a Moon site lists the figures, and the chart panel shows its terrain chart: the
+horizon with the Sun's and the Earth's paths, the Sun's disc in view and when the Earth is in
+sight (a Moon ground station has a **Passes / Terrain** switch).
+
+**Frames.** LOLA, LROC and the sites' coordinates use the Moon's Mean Earth frame (MOON_ME);
+GMAT's Moon-fixed axes are principal axes (MOON_PA). The fleet job turns GMAT's Moon-fixed
+directions into MOON_ME: a constant 103.85" rotation (~0.9 km at the surface), checked against
+GMAT run on SPICE MOON_PA and MOON_ME (match to 0.0000"). GMAT's default lunar axes (DE405)
+differ from SPICE's DE421 MOON_PA by another ~5" (~43 m), which is left as is.
+
+**Checks.** The equatorial nearside has the Sun 48.8% of the year and the Earth 100%; the
+farside never sees the Earth. At 89.5 S the Sun stays within +-2.0 deg of the horizontal (the
+1.54 deg lunar obliquity plus 0.5 deg from the pole). Shackleton's floor gets no Sun all year.
+The best-lit points found around the south pole (e.g. 89.77 S 156 W, 88% of the year at 2 m)
+are in line with the ~85-90% published for the best south-pole sites. The disc share is within
+0.25% of the exact geometry; the horizon march moves sunlight figures by under 0.2 points
+against 2-4x finer steps. Within one LOLA pixel (~470 m) the map has no detail, so a horizon set
+by very close terrain carries ~0.2 deg of uncertainty; published south-pole studies use 20-240 m
+polar maps, which drop in through the same polar coordinate system (see Moon resolution).
+
+### Sun, direct-to-Earth and link plots
+
+With Show info open on a Moon site, a ground station or a spacecraft, an XY plot (matplotlib,
+`tools/charts.py` `timeline_chart`, made by the fleet job) hangs under the info panel and moves
+with it (its own "::" grip moves it apart). Over the run's window, on one UTC axis:
+
+- **Sun**: the share of the Sun's disc in view -- above the terrain for a Moon site; past the
+  Earth's and the Moon's shadows (umbra and penumbra) for a spacecraft. Checked against GMAT's
+  EclipseLocator for the example lunar orbiter: all 28 umbra / penumbra edges in the window
+  within 0.1 s.
+- **Direct to Earth**: the Earth's elevation above the terrain (Moon sites) or above the Moon's
+  limb (lunar spacecraft); in sight above 0.
+- **Links**: the elevation through each pass, per spacecraft (stations) or per station
+  (spacecraft), with the beam edge.
+
+The span box next to the save icon switches the plot between **13 h** (the fleet run's window),
+**Week**, **Month**, **6 mo** and **Year**; the save icon saves the span shown. The longer spans
+are drawn on request by the local server (`/api/plot`, `tools/plots.py`) and kept until the next
+fleet run:
+
+- **Moon sites**: the Sun and the Earth over the span, from the terrain module's 30-day and
+  365-day series.
+- **Links and spacecraft sunlight / direct to Earth**: from a longer GMAT propagation
+  (`tools/longrun.py`), run on the first request: 30 days at 60 s (Week, Month; ~25 s) or 365
+  days at 120 s (6 months, Year; ~2.5 min) -- the viewer says so while it waits. Spacecraft from
+  elements continue from the fleet run's own state at "now" with the same force models; TLE
+  spacecraft are propagated a week only (their predictions drift by kilometres a day), and their
+  lines stop there, marked "TLE: 7 d"; OEM spacecraft use their file. A lunar spacecraft that
+  reaches the surface is cut off there. The geometry is the pass finder's (beam edge, Earth / Moon
+  in the way, the Moon stations' terrain), on whole arrays. Checked against the fleet run over the
+  12 hours they share: identical TLE and Moon positions, the lunar orbiter within 76 m, all 64 pass
+  edges within the 30 s sampling, identical sunlight.
+- A week shows each 3 hours' total, a month and longer each UTC day's: the share of the time in
+  sunlight or with the Earth in view, and the time in contact on each link (the 13 h view keeps the
+  orbit-by-orbit curves).
+
+Each span has its own axis: 13 h -- a tick every quarter hour, bold every hour; week -- every
+6 h, bold every day; month -- every day, bold every Monday; 6 months and a year -- every Monday,
+bold every month.
+
+For the 13 h view: every time-of-day axis follows one standard: a tick every quarter hour, a bold line and a label
+on every hour in 24-hour form (with the date at midnight), and the date in the axis title; each
+chart carries the fleet run's time along the bottom. PNGs are drawn at 400 dpi (a plot is
+2000 x 1600 px).
+
+The save icon (top right of this panel and of the chart panel) has the local server copy the
+plot as PNG and SVG into `exports/` (named after the plot and the UTC time saved; not
+committed). It needs `python tools/serve.py` running.
 
 ## JSON shape
 
@@ -440,8 +580,8 @@ panels (HTML) were tried first and never became visible in this runtime.
 ## Credits
 
 Earth imagery: NASA Blue Marble, served by NASA GIBS (layer
-`BlueMarble_ShadedRelief_Bathymetry`). Moon imagery: NASA LRO LROC WAC colour map, from the
-NASA Scientific Visualization Studio CGI Moon Kit.
+`BlueMarble_ShadedRelief_Bathymetry`). Moon imagery: NASA LRO LROC WAC colour map and LRO LOLA
+elevation map (`ldem_16`), from the NASA Scientific Visualization Studio CGI Moon Kit.
 
 ## License
 

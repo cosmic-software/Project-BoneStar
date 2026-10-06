@@ -129,6 +129,71 @@ PAYLOAD_FIELDS = [("tx_w", "Tx power (W)"), ("gain_dbi", "Antenna gain (dBi)"), 
                   ("up_rate_bps", "Uplink rate (bps)"), ("losses_db", "Other losses (dB)")]
 
 
+RADIO_FIELDS = [("down_mhz", "Downlink (MHz)"), ("up_mhz", "Uplink (MHz)")] + PAYLOAD_FIELDS
+
+
+def read_radios(path=SPACECRAFT_XLSX, tags_by_name=None):
+    """Sheet "Radios": the spacecraft's radios for link budgets, one row per radio (as many per
+    spacecraft as it carries: S-band TT&C, X-band science, Ka-band ...):
+
+        Spacecraft | Radio | Downlink (MHz) | Uplink (MHz) | Tx power (W) | Antenna gain (dBi)
+        | Downlink rate (bps) | Required Eb/N0 (dB) | Rx G/T (dB/K) | Uplink rate (bps)
+        | Other losses (dB)
+
+    Spacecraft is its name or catalog number (TLE spacecraft too). Radio is a name for it
+    (blank = its band). The downlink frequency sets its band, which picks the ground-station
+    radios it works with (tools/linkbudget.py); a blank uplink frequency means no uplink on this
+    radio unless the station gives one. The downlink budget needs Tx power, gain, rate and
+    required Eb/N0; the uplink (2-way stations) Rx G/T and the uplink rate.
+    Returns {tag: [radio, ...]}. Without a Radios sheet, the old one-radio Payloads sheet is
+    read instead (its radio has no frequency and takes the station's)."""
+    from linkbudget import band_of
+    path = pick_file(path)
+    if path is None:
+        return {}
+    try:
+        rows = read_sheet(path, "Radios")
+    except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
+        raise PlacesError(f"{path.name} could not be read as a spreadsheet ({e})")
+    if not rows or [str(c or "").strip() for c in (rows[0] + [None, None])[:2]] != ["Spacecraft", "Radio"]:
+        old = read_payloads(path, tags_by_name)     # no Radios sheet (read_sheet fell back to the first)
+        return {tag: [dict(p, name="Radio", down_mhz=None, up_mhz=None, band=None, up_band=None)]
+                for tag, p in old.items()}
+    tags_by_name = tags_by_name or {}
+    radios, errors = {}, []
+    width = 2 + len(RADIO_FIELDS)
+    for n, row in enumerate(rows[1:], start=2):
+        row = (row + [None] * width)[:width]
+        if all(c is None or (isinstance(c, str) and not c.strip()) for c in row):
+            continue
+        who = (f"{row[0]:g}" if isinstance(row[0], float) else str(row[0] or "")).strip()
+        tag = tags_by_name.get(who, tags_by_name.get(who.lower()))
+        if tag is None:
+            errors.append(f"{path.name} Radios row {n}: no spacecraft called '{who}' (use its name or catalog number)")
+            continue
+        try:
+            r = {}
+            for (key, title), cell in zip(RADIO_FIELDS, row[2:]):
+                r[key] = None if cell is None or (isinstance(cell, str) and not cell.strip()) else number(cell, title)
+            for key in ("down_mhz", "up_mhz", "tx_w", "rate_bps", "up_rate_bps"):
+                if r[key] is not None and r[key] <= 0:
+                    raise PlacesError(f"{dict(RADIO_FIELDS)[key]} must be above 0")
+            if r["down_mhz"] is None:
+                raise PlacesError("Downlink (MHz) is needed: it sets the radio's band")
+            r["losses_db"] = r["losses_db"] or 0.0
+            r["band"], r["up_band"] = band_of(r["down_mhz"]), band_of(r["up_mhz"])
+            name = (f"{row[1]:g}" if isinstance(row[1], float) else str(row[1] or "")).strip()
+            r["name"] = name or f"{r['band']}-band"
+            if any(x["name"] == r["name"] for x in radios.get(tag, [])):
+                raise PlacesError(f"{who} has two radios called '{r['name']}'")
+            radios.setdefault(tag, []).append(r)
+        except PlacesError as e:
+            errors.append(f"{path.name} Radios row {n}: {e}")
+    if errors:
+        raise PlacesError("\n".join(errors))
+    return radios
+
+
 def read_payloads(path=SPACECRAFT_XLSX, tags_by_name=None):
     """Sheet "Payloads": each spacecraft's radio for link budgets, one row per spacecraft:
 

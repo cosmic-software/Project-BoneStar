@@ -30,3 +30,12 @@ data/elements/
 # LibreOffice lock files
 .~lock.*#
 data/charts/
+data/moon_source/
+models/moon_2x.glb
+models/moon_4x.glb
+data/terrain_cache.json
+data/terrain_frames*
+exports/
+data/server.log
+data/series/
+data/long/
