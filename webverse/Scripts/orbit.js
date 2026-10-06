@@ -337,6 +337,7 @@ function Tick() {
     Step("UpdateLabels", UpdateLabels);
     Step("UpdateSelectBox", UpdateSelectBox);
     Step("UpdateSun", UpdateSun);
+    Step("UpdateMoonBake", UpdateMoonBake);
     Step("UpdateHud", UpdateHud);
     Step("UpdateInfo", UpdateInfo);
     Step("UpdateAttitudePanel", UpdateAttitudePanel);
@@ -1586,6 +1587,23 @@ function BandOf(mhz) {
     return name;
 }
 
+// A station's label line: its radios' bands, as in the chart titles ("S+X-band"); a station
+// with no radios shows its old Frequency column, or nothing.
+function StationBands(st) {
+    var bands = [];
+    var radios = st.radios || [];
+    for (var i = 0; i < radios.length; i++) {
+        var b = radios[i].band || BandOf(radios[i].down_mhz);
+        if (b !== null && b !== undefined && bands.indexOf(b) < 0) {
+            bands.push(b);
+        }
+    }
+    if (bands.length > 0) {
+        return bands.join("+") + "-band";
+    }
+    return Have(st.freq_mhz) ? st.freq_mhz + " MHz" : "";
+}
+
 // [{ st, sc, band }]: every station radio / spacecraft radio pair in the same downlink band (a
 // spacecraft radio with no frequency -- the old Payloads sheet -- pairs with every station radio).
 function RadioPairs(stationRadios, craftRadios) {
@@ -2490,52 +2508,98 @@ function UpdateLabels() {
 
 
 // ---- The Moon ----
-// models/moon.glb: a unit sphere with NASA's LRO LROC colour map, laid out like earth.glb,
-// raised to LOLA terrain at true scale (+-10 km) with a matching normal map
-// (local axes = the Moon-fixed axes in the viewer's (X, Z, Y) order), scaled to the mean lunar
-// radius. fleet.json "moon" gives it every 60 s from GMAT: its Earth-centred EarthMJ2000Eq
-// position and velocity (km, km/s; Hermite-interpolated here, as the spacecraft are) and q, its
-// rotation in the viewer's axes (Moon-fixed -> world, including libration; interpolated
-// linearly and renormalised -- it turns ~0.009 deg a minute). Lit by the same directional sun,
-// so it shows its phase. The Assets panel's Moon row centres the view on it.
+// The Moon model: a unit sphere with NASA's LRO LROC colour map, laid out like earth.glb, raised
+// to LOLA terrain at true scale (+-10 km) (local axes = the Moon-fixed axes in the viewer's (X, Z,
+// Y) order), scaled to the mean lunar radius. fleet.json "moon" gives it every 60 s from GMAT:
+// its Earth-centred EarthMJ2000Eq position and velocity (km, km/s; Hermite-interpolated here, as
+// the spacecraft are) and q, its rotation in the viewer's axes (Moon-fixed -> world, including
+// libration; interpolated linearly and renormalised -- it turns ~0.009 deg a minute). The Assets
+// panel's Moon row centres the view on it.
+// Its sunlight is BAKED (tools/moon_light.py): WebVerse draws sun shadows within 50 units of the
+// camera from one coarse map, and a lit Moon shadowed itself grey up close. So the model shown is
+// an unlit copy with the Sun's light and the terrain's cast shadows drawn into its colour maps,
+// for the Sun at the middle of the run's playback (fleet.json moon.lit). The fleet job bakes 1x;
+// 2x and 4x are baked by the local server when first picked (GET /api/moonlit, ~1-3 min).
 // Resolution levels (tools/make_moon.py): 1x 512 x 256 vertices (models/moon.glb), 2x and 4x
 // (moon_2x.glb, moon_4x.glb; built locally, too big to commit). fleet.json moon.levels lists the
 // ones built. The "1x v" box on the Assets panel's Moon row picks one: the new model loads under
 // its own id and the old one is removed only once it is in, so the Moon never disappears; lunar
-// sites move to the terrain that level draws (ground_m_levels). Each level is tiles of the same
-// lat/lon grid with two UV maps (equatorial and polar), see make_moon.py.
+// sites move to the terrain that level draws (ground_m_levels). A new fleet run's bake replaces
+// the shown model the same way.
 const MOON_LEVELS = [1, 2, 4];
-const MOON_LEVEL_IDS = { 1: "b0e5a000-0000-4000-a000-000000000003", 2: "b0e5a000-0000-4000-a000-000000000013",
-    4: "b0e5a000-0000-4000-a000-000000000023" };
 const MOON_LEVEL_TRIANGLES = { 1: "262k", 2: "1.0M", 4: "4.2M" };
-var moonBuilt = { "1": "models/moon.glb" };   // from fleet.json moon.levels once it is loaded
-var moonLevel = 1;                            // the level shown
-var moonLoading = null;                       // the level being loaded, or null
-var moonResOpen = false;                      // the level list is open in the Assets panel
+const MOON_BAKE_RETRY_FRAMES = 120;
+var moonBuilt = {};             // fleet.json moon.levels: the levels built, {"1": "models/moon.glb", ...}
+var moonLit = null;             // fleet.json moon.lit: { stamp, files: {"1": "models/lit/moon_1x_<stamp>.glb"} }
+var moonLevel = 1;              // the level shown
+var moonId = null;              // the shown model's entity id, and its URL
+var moonShownUrl = null;
+var moonLoading = null;         // the level being loaded, its id and URL, or null
+var moonLoadId = null;
+var moonLoadUrl = null;
+var moonBakeWant = null;        // a level waiting for the server to bake it, or null
+var moonBakePending = false;
+var moonBakeAt = 0;             // frame of the next request
+var moonBakeFrame = 0;
+var moonIdCounter = 0;
+var moonResOpen = false;        // the level list is open in the Assets panel
 const MOON_RADIUS_KM = 1737.4;
 const MOON_RADIUS = MOON_RADIUS_KM * KM_TO_WORLD_UNITS;
 const MOON_FRAMING = { start: 4 * MOON_RADIUS, min: 1.05 * MOON_RADIUS, max: 60 * MOON_RADIUS };
 var moonSamples = [];           // [ [t, x, y, z, vx, vy, vz, qx, qy, qz, qw], ... ]
 var moonNow = null;             // { km: [x, y, z], kmVel, world: Vector3, q: { x, y, z, w } } (GMAT km / Unity)
 
-function CreateMoon() {
-    LoadMoonLevel(1);
+function NextMoonId() {
+    moonIdCounter++;
+    var hex = moonIdCounter.toString(16);
+    while (hex.length < 12) {
+        hex = "0" + hex;
+    }
+    return "b0e5a000-0000-4000-b000-" + hex;
 }
 
-function LoadMoonLevel(level) {
+// The model to show for a level: its baked copy (null while it isn't baked yet); with an older
+// fleet.json that has no bake, the built model itself.
+function MoonUrl(level) {
+    if (moonLit === null) {
+        return moonBuilt[String(level)] || null;
+    }
+    return moonLit.files[String(level)] || null;
+}
+
+// After a fleet (re)load: show the bake of the shown level, or have the server bake it.
+function SyncMoon() {
+    if (!moonBuilt[String(moonLevel)]) {
+        moonLevel = 1;                       // that level is no longer built
+    }
+    var url = MoonUrl(moonLevel);
+    if (url === null) {
+        moonBakeWant = moonLevel;            // keep the old model on show until the bake is in
+        moonBakeAt = moonBakeFrame;
+        hudDirty = true;
+    } else if (url !== moonShownUrl && moonLoading === null) {
+        LoadMoonLevel(moonLevel, url);
+    }
+}
+
+function LoadMoonLevel(level, url) {
     moonLoading = level;
-    var url = DATA_BASE_URL + moonBuilt[String(level)];
-    MeshEntity.Create(null, url, [url], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
-        MOON_LEVEL_IDS[level], "OnMoonLoaded");
+    moonLoadId = NextMoonId();
+    moonLoadUrl = url;
+    var full = DATA_BASE_URL + url;
+    MeshEntity.Create(null, full, [full], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1), moonLoadId, "OnMoonLoaded");
+    hudDirty = true;
 }
 
 function OnMoonLoaded(moon) {
     var level = moonLoading;
     moonLoading = null;
-    var old = level !== moonLevel ? Entity.Get(MOON_LEVEL_IDS[moonLevel]) : null;
+    var old = moonId !== null ? Entity.Get(moonId) : null;
     if (old !== null) {
         old.tag = "";
     }
+    moonId = moonLoadId;
+    moonShownUrl = moonLoadUrl;
     moon.tag = "Moon";              // so SetFocus / Entity.GetByTag find it like the spacecraft
     moon.SetScale(new Vector3(MOON_RADIUS, MOON_RADIUS, MOON_RADIUS), false);
     moonLevel = level;
@@ -2550,11 +2614,56 @@ function OnMoonLoaded(moon) {
     ApplyMoonGround();
     hudDirty = true;
     StartFpsWatch();
-    Report("moon: " + level + "x loaded");
+    Report("moon: " + level + "x loaded (" + moonShownUrl + ")");
+    var url = MoonUrl(moonLevel);
+    if (url !== null && url !== moonShownUrl) {
+        LoadMoonLevel(moonLevel, url);       // a newer bake arrived while this one loaded
+    }
 }
 
-// The level box's words: "2x v", or "4x ..." while that level loads.
+// Asks the server for a level's bake every MOON_BAKE_RETRY_FRAMES until it is ready.
+function UpdateMoonBake() {
+    moonBakeFrame++;
+    if (moonBakeWant === null || moonBakePending || moonLit === null || moonBakeFrame < moonBakeAt) {
+        return;
+    }
+    moonBakePending = true;
+    HTTPNetworking.Fetch(DATA_BASE_URL + "api/moonlit?level=" + moonBakeWant + "&stamp=" + moonLit.stamp, "OnMoonBake");
+}
+
+function OnMoonBake(body) {
+    moonBakePending = false;
+    var result = null;
+    try {
+        result = JSON.parse(body);
+    } catch (e) {
+    }
+    var level = moonBakeWant;
+    if (level === null) {
+        return;
+    }
+    if (result !== null && result.ok) {
+        moonLit.files[String(level)] = result.file;
+        moonBakeWant = null;
+        hudDirty = true;
+        if (moonLoading === null) {
+            LoadMoonLevel(level, result.file);
+        }
+    } else if (result !== null && result.pending) {
+        moonBakeAt = moonBakeFrame + MOON_BAKE_RETRY_FRAMES;
+    } else {
+        Report("moon: baking " + level + "x failed: " + (result !== null ? result.error
+            : "no answer (is tools/serve.py running, and restarted?)"));
+        moonBakeWant = null;
+        hudDirty = true;
+    }
+}
+
+// The level box's words: "2x v", "4x ..." while that level loads, "4x baking" while it bakes.
 function MoonResLabel() {
+    if (moonBakeWant !== null) {
+        return moonBakeWant + "x baking";
+    }
     return moonLoading !== null && moonLoading !== moonLevel ? moonLoading + "x ..." : moonLevel + "x v";
 }
 
@@ -2566,14 +2675,21 @@ function ToggleMoonRes() {
 function SelectMoonLevel(level) {
     moonResOpen = false;
     hudDirty = true;
-    if (level === moonLevel || moonLoading !== null) {
+    if (level === moonLevel || moonLoading !== null || moonBakeWant !== null) {
         return;
     }
     if (!moonBuilt[String(level)]) {
         Report("moon: " + level + "x is not built (python tools/make_moon.py " + level + ")");
         return;
     }
-    LoadMoonLevel(level);
+    var url = MoonUrl(level);
+    if (url === null) {
+        moonBakeWant = level;
+        moonBakeAt = moonBakeFrame;
+        Report("moon: baking " + level + "x");
+        return;
+    }
+    LoadMoonLevel(level, url);
     Report("moon: loading " + level + "x");
 }
 
@@ -2668,7 +2784,7 @@ function MoonAt(t) {
 
 function UpdateMoon() {
     moonNow = MoonAt(elapsedSeconds);
-    var moon = Entity.Get(MOON_LEVEL_IDS[moonLevel]);
+    var moon = moonId !== null ? Entity.Get(moonId) : null;
     if (moon === null || moonNow === null) {
         return;
     }
@@ -2880,7 +2996,7 @@ function CreateSites(key, list) {
         if (key === "stations") {
             site.cosHalfFov = Math.cos(list[n].fov_deg * Math.PI / 360);
             site.link = list[n].link;
-            words += "\n" + list[n].freq_mhz + " MHz  " + list[n].link;
+            words += "\n" + StationBands(list[n]) + "  " + list[n].link;
             lines = 2;
             for (var k = 0; k < fleetTags.length; k++) {
                 var linkId = NextSiteId();
@@ -3425,15 +3541,15 @@ function UpdateSelectBox() {
 // real Sun (1 AU = ~1.5 million units) is far past the camera's far clipping distance (10000), so
 // it is drawn SUN_DRAW_DISTANCE from the camera along the true line of sight -- from the camera
 // to the Sun at 1 AU from the Earth's centre, so it is right seen from the Moon too -- and scaled
-// to its true angular size (0.53 deg across). The Earth and the Moon (nearer than that) cover it
-// as they should: sunrise over the limb, eclipses. It faces the camera and is see-through-blended,
-// so it casts no shadow. SUN_SIZE scales it up from the true size if it is too small to see.
+// to SUN_SIZE x its true angular size (0.53 deg across). The Earth and the Moon (nearer than that)
+// cover it as they should: sunrise over the limb, eclipses. It faces the camera and is
+// see-through-blended, so it casts no shadow. Like every script-created mesh it starts hidden.
 const SUN_URL = DATA_BASE_URL + "models/sun.glb";
 const SUN_ID = "b0e5a000-0000-4000-a000-000000000006";
 const SUN_DRAW_DISTANCE = 9000;            // units, inside the far clipping distance (10000)
 const AU_UNITS = 149597870.7 * KM_TO_WORLD_UNITS;
 const SUN_RADIUS_KM = 695700;
-const SUN_SIZE = 1;                        // x the true angular size
+const SUN_SIZE = 4;                        // x the true angular size (1 = true, ~10 px: too easy to miss)
 
 function CreateSun() {
     MeshEntity.Create(null, SUN_URL, [SUN_URL], new Vector3(0, 0, 0), new Quaternion(0, 0, 0, 1),
@@ -3441,6 +3557,7 @@ function CreateSun() {
 }
 
 function OnSunLoaded(sun) {
+    sun.SetVisibility(true);       // script-created meshes start hidden
     UpdateSun();
 }
 
@@ -3559,6 +3676,8 @@ function ApplyFleet(parsed) {
     moonSamples = parsed.moon ? parsed.moon.samples : [];
     if (parsed.moon && parsed.moon.levels) {
         moonBuilt = parsed.moon.levels;
+        moonLit = parsed.moon.lit || null;
+        SyncMoon();
     }
     CreateMissingCraft();
     ResizeCraft();
@@ -3744,7 +3863,6 @@ function UpdateOrbit() {
 PlaceCamera();
 CreatePie();
 CreateGrid();
-CreateMoon();
 CreateSelectBox();
 CreateFrame();
 CreateSun();

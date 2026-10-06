@@ -22,6 +22,11 @@ Serves the project root (like `python -m http.server 8000`, with content types f
                       {"ok": false, "pending": true}; ask again until {"ok": true, "file": ...}
                       (or {"ok": false, "error": ...}).
 
+    GET /api/moonlit?level=2|4&stamp=<fleet run>
+                      that Moon level with the Sun's light baked in for the current fleet run
+                      (tools/moon_light.py; the fleet job bakes 1x itself). Answers like
+                      /api/plot: pending while it bakes (~1-3 min), then {"ok": true, "file": ...}.
+
 The viewer's "Update TLEs" button calls the first and then reloads data/fleet.json; the save
 icon on its plot panels calls the second. Only one update runs at a time. Requests are logged to stdout and data/server.log, including the viewer's
 /__diag reports.
@@ -55,6 +60,21 @@ def plot_job(key, span):
     except Exception as e:           # reported to the viewer on its next request
         plot_jobs[(key, span)] = ("error", str(e))
         print(f"plot {key} {span}: failed ({e})", flush=True)
+moon_lock = threading.Lock()         # one Moon bake at a time (they need ~1-3 GB)
+moon_jobs = {}                       # (level, stamp) -> "running" or ("error", message)
+
+
+def moon_job(level, stamp):
+    import moon_light
+    try:
+        with moon_lock:
+            moon_light.bake_level(level, stamp)
+        moon_jobs.pop((level, stamp), None)
+    except Exception as e:           # reported to the viewer on its next request
+        moon_jobs[(level, stamp)] = ("error", str(e))
+        print(f"moon {level}x: bake failed ({e})", flush=True)
+
+
 EXPORTS = ROOT / "exports"
 update_lock = threading.Lock()
 
@@ -123,6 +143,25 @@ class Handler(SimpleHTTPRequestHandler):
             if job is None:
                 plot_jobs[(key, span)] = "running"
                 threading.Thread(target=plot_job, args=(key, span), daemon=True).start()
+            return self.send_json(200, {"ok": False, "pending": True})
+        if self.path.split("?")[0] == "/api/moonlit":
+            q = parse_qs(urlparse(self.path).query)
+            stamp = q.get("stamp", [""])[0]
+            import moon_light
+            try:
+                level = int(q.get("level", ["0"])[0])
+                rel = moon_light.cached(level, stamp)
+            except (OSError, ValueError) as e:
+                return self.send_json(400, {"ok": False, "error": str(e)})
+            if rel:
+                return self.send_json(200, {"ok": True, "file": rel})
+            job = moon_jobs.get((level, stamp))
+            if isinstance(job, tuple):
+                moon_jobs.pop((level, stamp), None)
+                return self.send_json(400, {"ok": False, "error": job[1]})
+            if job is None:
+                moon_jobs[(level, stamp)] = "running"
+                threading.Thread(target=moon_job, args=(level, stamp), daemon=True).start()
             return self.send_json(200, {"ok": False, "pending": True})
         if self.path.split("?")[0] == "/api/save":
             rel = parse_qs(urlparse(self.path).query).get("file", [""])[0]

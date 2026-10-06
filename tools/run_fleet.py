@@ -34,6 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import moon_light
 import terrain
 from terrain import pa_to_me
 from places import site_key
@@ -75,6 +76,7 @@ EARTH_RATE_DEG_PER_S = 360.98564736629 / 86400.0   # sidereal rotation rate
 
 WINDOW_BEFORE = timedelta(hours=1)
 WINDOW_AFTER = timedelta(hours=12)
+LIT_AT = WINDOW_AFTER / 2      # the Moon's light is baked for the Sun at the middle of the playback
 STEP_SECONDS = 60
 
 
@@ -724,6 +726,23 @@ def write_track(catalog, states, centre_t, colour, name, mu=MU_EARTH):
     return period, len(pts)
 
 
+def bake_moon(moon, t, stamp):
+    """Bake the 1x Moon's light for the Sun at t (s after the window start); removes earlier
+    runs' bakes (and WebVerse's cached copies of them). None if the 1x Moon isn't built."""
+    if 1 not in moon_levels():
+        return None
+    m = min(moon, key=lambda s: abs(s["t"] - t))
+    moon_light.clean(keep=set())
+    name = moon_light.lit_name(1, stamp)
+    secs = moon_light.bake(1, m["sun_mf"], moon_light.LIT_DIR / name, f"fleet run {stamp}, t = {m['t']:.0f} s")
+    sun = [c / math.sqrt(sum(x * x for x in m["sun_mf"])) for c in m["sun_mf"]]
+    print(f"Moon 1x light baked for the Sun at t = {m['t']:.0f} s (subsolar point "
+          f"{math.degrees(math.asin(sun[2])):.2f}, {math.degrees(math.atan2(sun[1], sun[0])):.2f} deg): "
+          f"models/lit/{name} in {secs:.0f} s")
+    return {"stamp": stamp, "t": m["t"], "sun_mf": [round(c, 3) for c in m["sun_mf"]],
+            "files": {"1": f"models/lit/{name}"}}
+
+
 def main():
     tles = read_tles()
     try:
@@ -806,6 +825,7 @@ def main():
     rotation, spread, n, sun_dir, moon = read_frames(start, now)
     print(f"Earth rotation at window start {rotation:.4f} deg ({n} GMAT samples, max spread "
           f"{spread:.4f} deg); Sun direction {[round(c, 4) for c in sun_dir]}; {len(moon)} Moon samples")
+    moon_lit = bake_moon(moon, (now + LIT_AT - start).total_seconds(), f"{now:%Y%m%d%H%M}")
 
     objects, names = {}, {}
     for c in crafts:
@@ -943,6 +963,10 @@ def main():
         "moon": {"radius_km": MOON_RADIUS_KM,
                  # the Moon models built (tools/make_moon.py): {"1": "models/moon.glb", ...}
                  "levels": {str(lv): f"models/{MOON_GLBS[lv].name}" for lv in moon_levels()},
+                 # the models the viewer shows: unlit copies with the Sun's light baked in for the
+                 # Sun at t (tools/moon_light.py); 1x here, 2x / 4x by the server on request
+                 # {stamp, t, sun_mf (Sun from the Moon, Moon-fixed ME, km), files: {"1": url}}
+                 "lit": moon_lit,
                  "samples": [[round(m["t"], 3)] + [round(x, 6) for x in m["pos"] + m["vel"]] + unity_quat(m["R"])
                              for m in moon]},
         "names": names,

@@ -216,13 +216,19 @@ shows old lines after an update.
 Earth rotation, Sun, orbit lines) and playback restarts at the new run time. The row shows
 "Updating...", then "Updated HH:MM UTC" or "Update failed".
 
-Lighting: WebVerse gives a VEML world no control over ambient light (it comes from the
-runtime's default sky). So the models' base colours are scaled down (Earth 0.4) and the sun
-is raised to 6.25 (`SUN_INTENSITY` in `orbit.js`): day sides look as they would at a 2.5 sun,
-the night side is dimmer, and the surface keeps a soft sheen. `atmosphere.glb` then adds the
-glow (four see-through blue shells at 38-191 km) and, drawn after them, thirteen flat-black
-caps at 223-246 km that darken the night side by a further 50%; the script turns the model
-so the caps face away from GMAT's Sun.
+Lighting: WebVerse draws the sun's shadows only within 50 units (5,000 km) of the camera, from
+a single 2048 px shadow map (set in the runtime; scripts can't change it). That map is far too
+coarse for a planet: a lit Earth or Moon shadowed itself and faded to a dull grey as the camera
+closed in. So neither is lit by the runtime any more -- both use unlit materials, which receive
+no shadows:
+
+- **Earth**: the Blue Marble map as it is, and `atmosphere.glb` draws the night: the glow (four
+  see-through blue shells at 38-191 km) and, drawn after them, thirteen flat-black caps at
+  223-246 km that darken the night side by 88% in the middle, with a soft terminator; the script
+  turns the model so the caps face away from GMAT's Sun.
+- **Moon**: the Sun's light is baked into its colour maps (see Moon lighting below).
+
+Spacecraft are still lit by the runtime's sun (intensity 6.25, `SUN_INTENSITY` in `orbit.js`).
 
 ### Adding a spacecraft
 
@@ -294,17 +300,44 @@ both frames. Checked: it turns 13.1757 deg/day (sidereal 13.1764) and its 0 deg 
 within 4.2 deg of the Earth (libration). `moon.glb` carries NASA's LRO LROC colour map (SVS CGI
 Moon Kit) on a unit sphere laid out like `earth.glb`, raised to the LRO LOLA elevation map at
 true scale with normal maps from the same elevation data for the finer slopes; the viewer
-scales it to the mean radius (1737.4 km), places and turns it, and the sun lights it, so it shows its phase. The Assets
+scales it to the mean radius (1737.4 km), places and turns it, and shows the copy with the Sun's
+light baked in (Moon lighting, below), so it shows its phase. The Assets
 panel's **Moon** row centres the view on it. The camera draws out to 10,000 units (1 million
 km), so the Moon (~3,800 units away) is always in range.
-
-### Moon resolution
 
 <img src="docs/images/lunar-south-pole-close.png" alt="Low over the lunar south pole: LOLA terrain and craters lit by the low Sun, LID 1 selected with a link line, the Example lunar station and the lunar south pole station nearby">
 <sub>Low over the lunar south pole. The cap beyond 60 deg is drawn with the polar
 (stereographic) maps, so the terrain stays sharp right at the pole, and the low Sun picks out
 the crater rims. LID 1 is selected (white square) with a live link; the Example lunar station
 and the lunar south pole station sit on the terrain beside it.</sub>
+
+### Moon lighting (baked)
+
+The Moon is drawn unlit, with the Sun's light already in its colour maps (`tools/moon_light.py`):
+
+- **Shading**: each texel's brightness follows the angle between its terrain slope (from the
+  LOLA elevation data, as the model's old normal maps) and the Sun, so crater walls facing the
+  Sun are bright and the far walls dark.
+- **Cast shadows**: from every texel the tool marches 1-300 km across the LOLA elevation map
+  toward the Sun, with the Moon's curvature, and keeps the share of the Sun's disc above that
+  horizon -- the method `terrain.py` uses for the sites' sunlight. Checked against `terrain.py`
+  itself (64 px/deg map, fine steps, 0.5 deg azimuth) at 150 random points within 8 deg of the
+  south pole with a grazing Sun: lit / dark agree at 99.3%, mean difference 1.4% of the disc
+  (the bake marches the 16 px/deg map; the misses sit on shadow edges).
+- **Night side**: a faint 3% fill, so the terrain stays just visible (a stand-in for earthshine).
+
+The Sun is taken at the middle of the viewer's playback (6 h after the run); it moves ~0.5 deg an
+hour across the Moon, so the light is up to ~3 deg off at either end of the window. Every fleet run
+(and **Update TLEs**) bakes the 1x Moon again (~25 s); 2x and 4x are baked by the local server
+the first time you pick them in that run (~80 s and ~2 min; the box says "2x baking"), and need
+`tools/serve.py` running. Baked models go to `models/lit/` (not committed), with the run in the
+file name since WebVerse caches models by name; the fleet job deletes earlier runs' bakes and
+WebVerse's cached copies of them. The baked 4x is 164 MB (the built one 248 MB: no normal maps).
+
+These shadows are for the picture. Assessment figures -- sunlight %, Earth in sight, passes --
+come from `terrain.py` at the full 64 px/deg resolution (see Lunar terrain).
+
+### Moon resolution
 
 The Assets panel's Moon row has a small **1x v** drop-down: 1x, 2x or 4x. `tools/make_moon.py`
 builds the levels from NASA's CGI Moon Kit (downloaded once into `data/moon_source/`):
@@ -382,7 +415,8 @@ more:
 - **Link**: `1-way` (the station only receives: downlink) or `2-way` (uplink and downlink).
   The cell has a drop-down.
 
-In the viewer each station is a cyan dot with a two-line label (name; frequency and link).
+In the viewer each station is a cyan dot with a two-line label: its name, then its radios' bands and link type (e.g. `S+X-band  2-way`, as in
+the chart titles; a station without radio rows shows its Frequency column instead).
 Place labels sit centred just above their dot and station labels centred just below theirs
 (up and down as seen on screen), so a place and a station at the same spot don't overlap.
 While a spacecraft is inside a station's beam, a cyan line joins them: **solid for 2-way,
