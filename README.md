@@ -4,8 +4,8 @@ A pipeline for turning GMAT-propagated spacecraft orbits into a live, browser-vi
 scene. GMAT does the orbital mechanics; the browser side (WebVerse) only ever consumes
 state and interpolates for playback -- it does no orbital computation itself.
 
-The current test case tracks the **ISS** and the **Hubble Space Telescope** from their
-public TLEs.
+The current fleet: the **ISS**, the **Hubble Space Telescope** and **NUSAT-50 (Nancy Roman)**
+from their public TLEs, and two polar **lunar orbiters** from Keplerian elements.
 
 <p align="center">
   <img src="docs/images/earth-atlantic-day.png" width="560"
@@ -182,7 +182,8 @@ Anything else (a Moon orbiter, or an Earth orbiter without a TLE) goes in `space
 
 | Name | Body | Source | Epoch (UTC) | SMA (km) | ECC | INC | RAAN | AOP | TA | OEM file |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Example lunar orbiter | Moon | Elements | 01 Oct 2026 00:00:00 | 1837.4 | 0.001 | 90 | 0 | 0 | 0 | |
+| lunar orbiter-1 | Moon | Elements | 01 Oct 2026 00:00:00 | 1837.4 | 0.001 | 90 | 0 | 0 | 0 | |
+| lunar orbiter-2 | Moon | Elements | 01 Oct 2026 00:00:00 | 1957.4 | 0.0015 | 90 | 30 | 0 | 0 | |
 
 - **Body**: the body it orbits, Earth or Moon (blank = Earth).
 - **Source = Elements**: osculating Keplerian elements at the Epoch, which must be at or before
@@ -205,7 +206,7 @@ Anything else (a Moon orbiter, or an Earth orbiter without a TLE) goes in `space
 label and Assets panel row are created automatically; a Moon orbiter's orbit lines are drawn
 about the Moon and move with it.
 
-Checked: a Moon-centred TDB copy of the example orbiter's trajectory, loaded as an OEM, lands
+Checked (on the earlier example orbiter, same elements as lunar orbiter-1): a Moon-centred TDB copy of its trajectory, loaded as an OEM, lands
 on the original to 0.0 m at every time, and the elements computed from it match GMAT's.
 Lunar elements: elements -> state -> elements round-trips to 4e-11; GMAT gets SMA and ECC back
 exactly, and for the example (INC 90, AOP 0, TA 0) the spacecraft starts at Moon-fixed Z =
@@ -217,8 +218,9 @@ the south pole now peak at ~83 deg (with the J2000 equator they peaked at ~47 de
 Every 3D model lives in `models/`. `spacecraft.xlsx`, sheet **Models**, says which spacecraft is
 drawn with which: Spacecraft (its name or catalog number; TLE spacecraft too), Model (a .glb
 file name in `models/`; blank = `probe.glb`) and Scale (multiplies the standard size: 0.5 = half
-as long; blank = 1). A spacecraft not listed is drawn with `probe.glb` at scale 1; the example
-lunar orbiter uses `probe_2.glb` at 0.5. The camera framing follows the scale, so a small model
+as long; blank = 1). A spacecraft not listed is drawn with `probe.glb` at scale 1; lunar
+orbiter-1 uses `probe_2.glb` at 0.5 and lunar orbiter-2 `probe_3.glb` at 0.1. The file name
+must match the file's case exactly (GitHub and web servers are case-sensitive). The camera framing follows the scale, so a small model
 can be approached closer (down to 0.45 units, just past the panels). Build a model like `probe.glb`, in the exported file's axes:
 
 - **+X along the velocity**: the front, and the instrument boresight -- the axis the attitude
